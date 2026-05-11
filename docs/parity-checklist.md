@@ -13,7 +13,8 @@ Legend: `[x]` implemented in the Rust app, `[~]` partially implemented, `[ ]` st
 - [x] Refresh the folder tree with a button and `F5`.
 - [x] Show the active root path, current file name, and full file path.
 - [x] Copy the current file path.
-- [~] Show selected files/folders in the platform file browser. Current Rust behavior opens the containing folder for the active file.
+- [x] Show selected files/folders in the platform file browser.
+- [x] Expand the tree toward the active file when reopening or navigating.
 - [x] Reopen the last folder and file on startup.
 
 ## Reading And Editing
@@ -28,6 +29,8 @@ Legend: `[x]` implemented in the Rust app, `[~]` partially implemented, `[ ]` st
 - [x] Prompt before losing unsaved changes.
 - [~] Preserve editor caret/scroll state and rendered scroll state per file. Rendered scroll is persisted; editor state uses per-file widget identity.
 - [x] Toggle line wrapping.
+- [x] Rendered mode honors no-wrap horizontal scrolling.
+- [x] Middle mouse drag scrolling works on document surfaces.
 
 ## Markdown Support
 
@@ -69,7 +72,8 @@ Legend: `[x]` implemented in the Rust app, `[~]` partially implemented, `[ ]` st
 - [x] Persist line wrapping.
 - [x] Persist window size.
 - [x] Keep controls readable across themes.
-- [~] Rounded theme dropdown and compact tool controls. egui native controls are themed but not fully custom-drawn.
+- [x] Rounded theme dropdown and compact tool controls.
+- [x] Match WPF reference font scale, document padding, editor padding, and status/title text behavior.
 
 ## Reliability
 
