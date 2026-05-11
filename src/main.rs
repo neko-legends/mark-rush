@@ -670,6 +670,12 @@ impl MarkRushApp {
         };
 
         let edit = egui::TextEdit::multiline(&mut self.document_text)
+            .id(egui::Id::new("editor").with(
+                self.current_file
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ))
             .desired_width(desired_width)
             .code_editor()
             .lock_focus(true);
@@ -1221,7 +1227,7 @@ fn draw_inline_segments(
         let mut remaining = text;
         while let Some((before, label, target, after)) = next_markdown_link(remaining) {
             if !before.is_empty() {
-                ui.label(egui::RichText::new(before).color(text_color));
+                draw_plain_inline(ui, before, theme, text_color);
             }
 
             let response = ui.link(egui::RichText::new(label).color(theme.accent_2));
@@ -1233,11 +1239,68 @@ fn draw_inline_segments(
         }
 
         if !remaining.is_empty() {
-            ui.label(egui::RichText::new(remaining).color(text_color));
+            draw_plain_inline(ui, remaining, theme, text_color);
         }
     });
 
     clicked_link
+}
+
+fn draw_plain_inline(ui: &mut egui::Ui, text: &str, theme: &AppTheme, text_color: egui::Color32) {
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        let bold = remaining.find("**").map(|index| (index, "**"));
+        let code = remaining.find('`').map(|index| (index, "`"));
+        let italic = remaining
+            .find('*')
+            .filter(|index| {
+                !remaining[*index..].starts_with("**")
+                    && (*index == 0 || remaining.as_bytes().get(*index - 1) != Some(&b'*'))
+            })
+            .map(|index| (index, "*"));
+
+        let marker = [bold, code, italic]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(index, _)| *index);
+
+        let Some((index, marker)) = marker else {
+            ui.label(egui::RichText::new(remaining).color(text_color));
+            break;
+        };
+
+        if index > 0 {
+            ui.label(egui::RichText::new(&remaining[..index]).color(text_color));
+        }
+
+        let after_marker = &remaining[index + marker.len()..];
+        let Some(end) = after_marker.find(marker) else {
+            ui.label(egui::RichText::new(&remaining[index..]).color(text_color));
+            break;
+        };
+
+        let inner = &after_marker[..end];
+        match marker {
+            "**" => {
+                ui.label(egui::RichText::new(inner).strong().color(text_color));
+            }
+            "`" => {
+                egui::Frame::new()
+                    .fill(theme.code)
+                    .inner_margin(egui::Margin::symmetric(4, 1))
+                    .show(ui, |ui| {
+                        ui.monospace(egui::RichText::new(inner).color(theme.accent));
+                    });
+            }
+            "*" => {
+                ui.label(egui::RichText::new(inner).italics().color(text_color));
+            }
+            _ => unreachable!(),
+        }
+
+        remaining = &after_marker[end + marker.len()..];
+    }
 }
 
 fn next_markdown_link(text: &str) -> Option<(&str, &str, &str, &str)> {

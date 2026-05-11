@@ -26,7 +26,7 @@ Legend: `[x]` implemented in the Rust app, `[~]` partially implemented, `[ ]` st
 - [x] Auto-enable editing on paste or cut shortcuts.
 - [x] Save with a button and `Ctrl+S`.
 - [x] Prompt before losing unsaved changes.
-- [~] Preserve editor caret/scroll state and rendered scroll state per file. Rendered scroll is persisted; editor caret restoration is pending.
+- [~] Preserve editor caret/scroll state and rendered scroll state per file. Rendered scroll is persisted; editor state uses per-file widget identity.
 - [x] Toggle line wrapping.
 
 ## Markdown Support
@@ -36,8 +36,8 @@ Legend: `[x]` implemented in the Rust app, `[~]` partially implemented, `[ ]` st
 - [x] Blockquotes.
 - [x] Ordered and unordered lists.
 - [x] Code blocks.
-- [~] Inline code. Raw markers are visible in the current fast renderer.
-- [~] Bold and italic emphasis. Raw markers are visible in the current fast renderer.
+- [x] Inline code.
+- [x] Bold and italic emphasis.
 - [x] Horizontal rules.
 - [~] Tables. Rows render quickly, but full table layout is pending.
 - [x] Links.
