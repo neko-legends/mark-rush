@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mdx", "mkd", "rmd"];
 const MAX_STORED_STATUS: usize = 180;
+const READER_ROW_HEIGHT: f32 = 23.0;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -33,6 +34,7 @@ struct AppSettings {
     last_file_path: Option<PathBuf>,
     theme_name: String,
     word_wrap: bool,
+    file_view_states: HashMap<PathBuf, FileViewState>,
 }
 
 impl Default for AppSettings {
@@ -42,8 +44,14 @@ impl Default for AppSettings {
             last_file_path: None,
             theme_name: "EVA Dark".to_owned(),
             word_wrap: true,
+            file_view_states: HashMap::new(),
         }
     }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct FileViewState {
+    reader_line: usize,
 }
 
 #[derive(Clone)]
@@ -162,6 +170,7 @@ struct SearchMatch {
 #[derive(Clone)]
 enum PendingAction {
     OpenFile(PathBuf),
+    OpenFileWithAnchor(PathBuf, String),
     SetRoot(PathBuf),
     ClearFile,
 }
@@ -184,6 +193,7 @@ struct MarkRushApp {
     pending_action: Option<PendingAction>,
     show_save_prompt: bool,
     known_roots: HashSet<PathBuf>,
+    pending_scroll_line: Option<usize>,
 }
 
 impl MarkRushApp {
@@ -212,6 +222,7 @@ impl MarkRushApp {
             pending_action: None,
             show_save_prompt: false,
             known_roots: HashSet::new(),
+            pending_scroll_line: None,
         };
 
         app.apply_startup_target();
@@ -463,6 +474,21 @@ impl MarkRushApp {
                         if ui
                             .add_enabled(
                                 self.current_file.is_some(),
+                                egui::Button::new("Show").fill(theme.button),
+                            )
+                            .clicked()
+                        {
+                            if let Some(path) = &self.current_file {
+                                let target = path.parent().unwrap_or(path);
+                                if let Err(error) = open::that(target) {
+                                    self.set_status(format!("Could not open folder: {error}"));
+                                }
+                            }
+                        }
+
+                        if ui
+                            .add_enabled(
+                                self.current_file.is_some(),
                                 egui::Button::new("Copy Path").fill(theme.button),
                             )
                             .clicked()
@@ -540,17 +566,47 @@ impl MarkRushApp {
             .get(self.current_match)
             .map(|search_match| search_match.line_index);
 
-        let row_height = 23.0;
-        let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        let current_match_line = current_match_line.or(self.pending_scroll_line);
+        let scroll_offset = self
+            .pending_scroll_line
+            .take()
+            .map(|line| line as f32 * READER_ROW_HEIGHT);
+        let mut clicked_link = None;
 
-        scroll.show_rows(ui, row_height, self.render_lines.len(), |ui, row_range| {
-            for index in row_range {
-                if let Some(line) = self.render_lines.get(index) {
-                    let is_match = current_match_line == Some(index);
-                    draw_render_line(ui, line, &theme, is_match);
+        let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(offset) = scroll_offset {
+            scroll = scroll.vertical_scroll_offset(offset);
+        }
+
+        let output = scroll.show_rows(
+            ui,
+            READER_ROW_HEIGHT,
+            self.render_lines.len(),
+            |ui, row_range| {
+                for index in row_range {
+                    if let Some(line) = self.render_lines.get(index) {
+                        let is_match = current_match_line == Some(index);
+                        if let Some(target) = draw_render_line(ui, line, &theme, is_match) {
+                            clicked_link = Some(target);
+                        }
+                    }
                 }
-            }
-        });
+            },
+        );
+
+        if let (Some(path), Some(state)) = (
+            self.current_file.clone(),
+            Some(FileViewState {
+                reader_line: (output.state.offset.y / READER_ROW_HEIGHT).floor().max(0.0) as usize,
+            }),
+        ) {
+            self.settings.file_view_states.insert(path, state);
+            self.save_settings();
+        }
+
+        if let Some(target) = clicked_link {
+            self.follow_link(&target);
+        }
     }
 
     fn draw_editor(&mut self, ui: &mut egui::Ui) {
@@ -640,6 +696,13 @@ impl MarkRushApp {
                 self.save_current_file();
             }
 
+            if self.current_file.is_some()
+                && input.modifiers.command
+                && (input.key_pressed(egui::Key::V) || input.key_pressed(egui::Key::X))
+            {
+                self.edit_mode = true;
+            }
+
             if input.key_pressed(egui::Key::F) && input.modifiers.command {
                 self.set_status("Search is ready");
             }
@@ -699,6 +762,10 @@ impl MarkRushApp {
     fn apply_action(&mut self, action: PendingAction) {
         match action {
             PendingAction::OpenFile(path) => self.load_file(path),
+            PendingAction::OpenFileWithAnchor(path, fragment) => {
+                self.load_file(path);
+                self.jump_to_anchor(&fragment);
+            }
             PendingAction::SetRoot(path) => {
                 self.set_root(path);
                 self.apply_action(PendingAction::ClearFile);
@@ -734,6 +801,11 @@ impl MarkRushApp {
                 self.dirty = false;
                 self.edit_mode = false;
                 self.settings.last_file_path = Some(full_path.clone());
+                self.pending_scroll_line = self
+                    .settings
+                    .file_view_states
+                    .get(&full_path)
+                    .map(|state| state.reader_line);
                 self.save_settings();
                 self.rebuild_search();
                 self.set_status(format!("Loaded {}", full_path.display()));
@@ -802,6 +874,10 @@ impl MarkRushApp {
         let len = self.search_matches.len() as isize;
         let next = (self.current_match as isize + direction).rem_euclid(len);
         self.current_match = next as usize;
+        self.pending_scroll_line = self
+            .search_matches
+            .get(self.current_match)
+            .map(|search_match| search_match.line_index);
     }
 
     fn search_status(&self) -> String {
@@ -869,6 +945,80 @@ impl MarkRushApp {
             let _ = fs::write(path, json);
         }
     }
+
+    fn follow_link(&mut self, target: &str) {
+        let target = target.trim();
+        if target.is_empty() {
+            return;
+        }
+
+        if is_external_link(target) {
+            match open::that(target) {
+                Ok(()) => self.set_status("Opened external link"),
+                Err(error) => self.set_status(format!("Could not open link: {error}")),
+            }
+            return;
+        }
+
+        let Some(current_file) = self.current_file.clone() else {
+            return;
+        };
+
+        let (path_part, fragment) = split_link_target(target);
+
+        if path_part.is_empty() {
+            if let Some(fragment) = fragment {
+                self.jump_to_anchor(&fragment);
+            }
+            return;
+        }
+
+        let base_dir = current_file.parent().unwrap_or_else(|| Path::new("."));
+        let candidate = if Path::new(&path_part).is_absolute() {
+            PathBuf::from(&path_part)
+        } else {
+            base_dir.join(&path_part)
+        };
+        let candidate = absolute_path(&candidate);
+
+        if candidate.is_dir() {
+            match open::that(&candidate) {
+                Ok(()) => self.set_status(format!("Opened folder {}", candidate.display())),
+                Err(error) => self.set_status(format!("Could not open folder: {error}")),
+            }
+            return;
+        }
+
+        if candidate.is_file() {
+            if is_markdown_file(&candidate) {
+                if let Some(fragment) = fragment {
+                    self.request_action(PendingAction::OpenFileWithAnchor(candidate, fragment));
+                } else {
+                    self.request_action(PendingAction::OpenFile(candidate));
+                }
+            } else if let Err(error) = open::that(&candidate) {
+                self.set_status(format!("Could not open file: {error}"));
+            }
+            return;
+        }
+
+        self.set_status(format!("Link target not found: {target}"));
+    }
+
+    fn jump_to_anchor(&mut self, fragment: &str) {
+        let target_slug = create_heading_slug(fragment);
+        for (index, line) in self.render_lines.iter().enumerate() {
+            if matches!(line.kind, RenderKind::Heading(_))
+                && create_heading_slug(&line.text) == target_slug
+            {
+                self.pending_scroll_line = Some(index);
+                self.set_status(format!("Jumped to #{fragment}"));
+                return;
+            }
+        }
+
+        self.set_status(format!("Anchor not found: #{fragment}"));
+    }
 }
 
 impl eframe::App for MarkRushApp {
@@ -922,7 +1072,13 @@ fn show_tree(
     }
 }
 
-fn draw_render_line(ui: &mut egui::Ui, line: &RenderLine, theme: &AppTheme, is_match: bool) {
+fn draw_render_line(
+    ui: &mut egui::Ui,
+    line: &RenderLine,
+    theme: &AppTheme,
+    is_match: bool,
+) -> Option<String> {
+    let mut clicked_link = None;
     let fill = if is_match {
         theme.search_highlight
     } else {
@@ -957,7 +1113,7 @@ fn draw_render_line(ui: &mut egui::Ui, line: &RenderLine, theme: &AppTheme, is_m
             RenderKind::Quote => {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("|").color(theme.accent));
-                    ui.label(egui::RichText::new(&line.text).italics().color(theme.muted));
+                    clicked_link = draw_inline_segments(ui, &line.text, theme, theme.muted);
                 });
             }
             RenderKind::Code => {
@@ -972,14 +1128,60 @@ fn draw_render_line(ui: &mut egui::Ui, line: &RenderLine, theme: &AppTheme, is_m
                 ui.separator();
             }
             RenderKind::List | RenderKind::Table | RenderKind::Paragraph => {
-                ui.label(egui::RichText::new(&line.text).color(text_color));
+                clicked_link = draw_inline_segments(ui, &line.text, theme, text_color);
             }
         }
     });
+
+    clicked_link
 }
 
 fn themed_button(ui: &mut egui::Ui, label: &str, theme: &AppTheme) -> egui::Response {
     ui.add(egui::Button::new(label).fill(theme.button))
+}
+
+fn draw_inline_segments(
+    ui: &mut egui::Ui,
+    text: &str,
+    theme: &AppTheme,
+    text_color: egui::Color32,
+) -> Option<String> {
+    let mut clicked_link = None;
+
+    ui.horizontal_wrapped(|ui| {
+        let mut remaining = text;
+        while let Some((before, label, target, after)) = next_markdown_link(remaining) {
+            if !before.is_empty() {
+                ui.label(egui::RichText::new(before).color(text_color));
+            }
+
+            let response = ui.link(egui::RichText::new(label).color(theme.accent_2));
+            if response.clicked() {
+                clicked_link = Some(target.to_owned());
+            }
+
+            remaining = after;
+        }
+
+        if !remaining.is_empty() {
+            ui.label(egui::RichText::new(remaining).color(text_color));
+        }
+    });
+
+    clicked_link
+}
+
+fn next_markdown_link(text: &str) -> Option<(&str, &str, &str, &str)> {
+    let open_bracket = text.find('[')?;
+    let after_open = &text[open_bracket + 1..];
+    let close_label = after_open.find("](")?;
+    let label = &after_open[..close_label];
+    let after_label = &after_open[close_label + 2..];
+    let close_target = after_label.find(')')?;
+    let target = &after_label[..close_target];
+    let after = &after_label[close_target + 1..];
+
+    Some((&text[..open_bracket], label, target, after))
 }
 
 fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
@@ -1099,6 +1301,64 @@ fn is_markdown_file(path: &Path) -> bool {
                 .any(|candidate| candidate.eq_ignore_ascii_case(extension))
         })
         .unwrap_or(false)
+}
+
+fn is_external_link(target: &str) -> bool {
+    let lower = target.to_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+}
+
+fn split_link_target(target: &str) -> (String, Option<String>) {
+    let mut parts = target.splitn(2, '#');
+    let path_part = percent_decode(parts.next().unwrap_or_default().trim());
+    let fragment = parts.next().map(|fragment| percent_decode(fragment.trim()));
+    (path_part, fragment)
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
+                if let Ok(value) = u8::from_str_radix(hex, 16) {
+                    decoded.push(value);
+                    index += 3;
+                    continue;
+                }
+            }
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&decoded).to_string()
+}
+
+fn create_heading_slug(text: &str) -> String {
+    let mut slug = String::with_capacity(text.len());
+    let mut last_was_hyphen = false;
+
+    for character in text.trim().chars().flat_map(char::to_lowercase) {
+        if character.is_alphanumeric() {
+            slug.push(character);
+            last_was_hyphen = false;
+        } else if character == '_' {
+            slug.push(character);
+            last_was_hyphen = false;
+        } else if (character.is_whitespace() || character == '-')
+            && !last_was_hyphen
+            && !slug.is_empty()
+        {
+            slug.push('-');
+            last_was_hyphen = true;
+        }
+    }
+
+    slug.trim_matches('-').to_owned()
 }
 
 fn is_visible_dir(path: &Path) -> bool {
