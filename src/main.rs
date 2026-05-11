@@ -454,6 +454,7 @@ impl MarkRushApp {
                         .id_salt("sidebar-tree-scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            apply_compact_tree_style(ui);
                             if let Some(root) = &mut self.root {
                                 if let Some(action) =
                                     show_tree(ui, root, self.current_file.as_deref(), &theme)
@@ -1589,6 +1590,17 @@ impl eframe::App for MarkRushApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.draw(ui, frame);
     }
+}
+
+fn apply_compact_tree_style(ui: &mut egui::Ui) {
+    let style = ui.style_mut();
+    style.spacing.item_spacing = egui::vec2(4.0, 1.0);
+    style.spacing.button_padding = egui::vec2(6.0, 2.0);
+    style.spacing.interact_size = egui::vec2(20.0, 20.0);
+    style.text_styles.insert(
+        egui::TextStyle::Body,
+        egui::FontId::new(13.0, egui::FontFamily::Proportional),
+    );
 }
 
 fn show_tree(
