@@ -287,24 +287,38 @@ impl MarkRushApp {
         self.remember_window_size(ui.ctx());
         self.handle_shortcuts(ui);
 
-        egui::Frame::new().fill(self.theme().window).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let height = ui.available_height();
-                ui.allocate_ui_with_layout(
-                    egui::vec2(300.0, height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| self.draw_sidebar(ui),
-                );
+        let full_rect = ui.max_rect();
+        let theme = self.theme().clone();
+        ui.painter().rect_filled(full_rect, 0, theme.window);
 
-                ui.separator();
+        let sidebar_width = 320.0;
+        let divider_x = full_rect.min.x + sidebar_width;
+        let sidebar_rect =
+            egui::Rect::from_min_max(full_rect.min, egui::pos2(divider_x, full_rect.max.y));
+        let workspace_rect =
+            egui::Rect::from_min_max(egui::pos2(divider_x + 1.0, full_rect.min.y), full_rect.max);
 
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| self.draw_workspace(ui, frame),
-                );
-            });
-        });
+        ui.painter().line_segment(
+            [
+                egui::pos2(divider_x, full_rect.min.y),
+                egui::pos2(divider_x, full_rect.max.y),
+            ],
+            egui::Stroke::new(1.0, theme.border),
+        );
+
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(sidebar_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| self.draw_sidebar(ui),
+        );
+
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(workspace_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| self.draw_workspace(ui, frame),
+        );
 
         if self.show_save_prompt {
             self.draw_save_prompt(ui.ctx());
@@ -313,11 +327,15 @@ impl MarkRushApp {
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme().clone();
+        let rect = ui.max_rect();
+        ui.painter().rect_filled(rect, 0, theme.panel);
+        let inner_rect = rect.shrink2(egui::vec2(12.0, 12.0));
 
-        egui::Frame::new()
-            .fill(theme.panel)
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(inner_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new("Mark Rush")
@@ -371,33 +389,81 @@ impl MarkRushApp {
                             }
                         });
                 });
-            });
+            },
+        );
     }
 
     fn draw_workspace(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let theme = self.theme().clone();
+        let rect = ui.max_rect();
+        ui.painter().rect_filled(rect, 0, theme.panel_alt);
 
-        egui::Frame::new()
-            .fill(theme.panel_alt)
-            .inner_margin(egui::Margin::same(0))
-            .show(ui, |ui| {
-                self.draw_topbar(ui);
-                ui.separator();
-                self.draw_searchbar(ui);
-                ui.separator();
+        let topbar_height = 78.0;
+        let searchbar_height = 48.0;
+        let statusbar_height = 30.0;
+        let topbar_rect = egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(rect.max.x, (rect.min.y + topbar_height).min(rect.max.y)),
+        );
+        let searchbar_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, topbar_rect.max.y),
+            egui::pos2(
+                rect.max.x,
+                (topbar_rect.max.y + searchbar_height).min(rect.max.y),
+            ),
+        );
+        let statusbar_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, (rect.max.y - statusbar_height).max(rect.min.y)),
+            rect.max,
+        );
+        let document_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, searchbar_rect.max.y),
+            egui::pos2(rect.max.x, statusbar_rect.min.y.max(searchbar_rect.max.y)),
+        );
 
-                let available_width = ui.available_width();
-                let document_height = (ui.available_height() - 28.0).max(0.0);
-                ui.allocate_ui(egui::vec2(available_width, document_height), |ui| {
+        for y in [
+            topbar_rect.max.y,
+            searchbar_rect.max.y,
+            statusbar_rect.min.y,
+        ] {
+            ui.painter().line_segment(
+                [egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)],
+                egui::Stroke::new(1.0, theme.border),
+            );
+        }
+
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(topbar_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| self.draw_topbar(ui),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(searchbar_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| self.draw_searchbar(ui),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(document_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
+                ui.allocate_ui(document_rect.size(), |ui| {
                     if self.edit_mode {
                         self.draw_editor(ui);
                     } else {
                         self.draw_reader(ui);
                     }
                 });
-                ui.separator();
-                self.draw_statusbar(ui);
-            });
+            },
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(statusbar_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| self.draw_statusbar(ui),
+        );
     }
 
     fn draw_topbar(&mut self, ui: &mut egui::Ui) {
