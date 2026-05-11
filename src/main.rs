@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use directories::ProjectDirs;
 use eframe::egui;
@@ -18,6 +19,7 @@ const MAX_STORED_STATUS: usize = 180;
 const MAX_STORED_FILE_VIEW_STATES: usize = 250;
 const MIDDLE_SCROLL_DEAD_ZONE: f32 = 8.0;
 const MIDDLE_SCROLL_MAX_SPEED: f32 = 80.0;
+const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const DEFAULT_DOCUMENT_FONT_FAMILY: &str = "System UI";
 const DEFAULT_DOCUMENT_FONT_SIZE: f32 = 15.0;
 const FONT_SIZE_OPTIONS: &[f32] = &[12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0];
@@ -1095,7 +1097,7 @@ impl MarkRushApp {
                     start_pos: pointer_pos,
                 });
                 ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
-                ui.ctx().request_repaint();
+                ui.ctx().request_repaint_after(ANIMATION_FRAME_INTERVAL);
             }
             return;
         }
@@ -1131,7 +1133,7 @@ impl MarkRushApp {
         if changed {
             state.store(ui.ctx(), output.id);
         }
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(ANIMATION_FRAME_INTERVAL);
     }
 
     fn draw_save_prompt(&mut self, ctx: &egui::Context) {
