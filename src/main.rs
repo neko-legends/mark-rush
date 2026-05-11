@@ -14,11 +14,16 @@ const READER_ROW_HEIGHT: f32 = 23.0;
 
 fn main() -> eframe::Result {
     install_panic_hook();
+    let settings = load_settings(settings_path().as_deref());
+    let window_size = [
+        settings.window_width.unwrap_or(1180.0),
+        settings.window_height.unwrap_or(760.0),
+    ];
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MarkRush")
-            .with_inner_size([1180.0, 760.0])
+            .with_inner_size(window_size)
             .with_min_inner_size([840.0, 520.0]),
         ..Default::default()
     };
@@ -36,6 +41,8 @@ struct AppSettings {
     last_file_path: Option<PathBuf>,
     theme_name: String,
     word_wrap: bool,
+    window_width: Option<f32>,
+    window_height: Option<f32>,
     file_view_states: HashMap<PathBuf, FileViewState>,
 }
 
@@ -46,6 +53,8 @@ impl Default for AppSettings {
             last_file_path: None,
             theme_name: "EVA Dark".to_owned(),
             word_wrap: true,
+            window_width: None,
+            window_height: None,
             file_view_states: HashMap::new(),
         }
     }
@@ -275,6 +284,7 @@ impl MarkRushApp {
 
     fn draw(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.apply_theme(ui.ctx());
+        self.remember_window_size(ui.ctx());
         self.handle_shortcuts(ui);
 
         egui::Frame::new().fill(self.theme().window).show(ui, |ui| {
@@ -979,6 +989,29 @@ impl MarkRushApp {
 
         if let Ok(json) = serde_json::to_string_pretty(&self.settings) {
             let _ = fs::write(path, json);
+        }
+    }
+
+    fn remember_window_size(&mut self, ctx: &egui::Context) {
+        let Some(inner_rect) = ctx.input(|input| input.viewport().inner_rect) else {
+            return;
+        };
+
+        let width = inner_rect.width().round().max(1.0);
+        let height = inner_rect.height().round().max(1.0);
+        let changed = self
+            .settings
+            .window_width
+            .is_none_or(|stored| (stored - width).abs() > 1.0)
+            || self
+                .settings
+                .window_height
+                .is_none_or(|stored| (stored - height).abs() > 1.0);
+
+        if changed {
+            self.settings.window_width = Some(width);
+            self.settings.window_height = Some(height);
+            self.save_settings();
         }
     }
 
