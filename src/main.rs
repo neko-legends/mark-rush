@@ -100,7 +100,7 @@ impl TreeEntry {
             .file_name()
             .and_then(|value| value.to_str())
             .map(str::to_owned)
-            .unwrap_or_else(|| path.to_string_lossy().to_string());
+            .unwrap_or_else(|| display_path(&path));
 
         Self {
             path,
@@ -359,7 +359,7 @@ impl MarkRushApp {
                     let root_label = self
                         .root
                         .as_ref()
-                        .map(|entry| entry.path.to_string_lossy().to_string())
+                        .map(|entry| display_path(&entry.path))
                         .unwrap_or_else(|| "No folder open".to_owned());
                     ui.add(
                         egui::Label::new(
@@ -492,7 +492,7 @@ impl MarkRushApp {
                         let file_path = self
                             .current_file
                             .as_ref()
-                            .map(|path| path.to_string_lossy().to_string())
+                            .map(|path| display_path(path))
                             .unwrap_or_default();
                         ui.add(
                             egui::Label::new(
@@ -578,7 +578,7 @@ impl MarkRushApp {
                             .clicked()
                         {
                             if let Some(path) = &self.current_file {
-                                ui.ctx().copy_text(path.to_string_lossy().to_string());
+                                ui.ctx().copy_text(display_path(path));
                                 self.set_status("Copied file path");
                             }
                         }
@@ -916,7 +916,7 @@ impl MarkRushApp {
         self.known_roots.insert(root_path.clone());
         self.settings.last_root_path = Some(root_path.clone());
         self.save_settings();
-        self.set_status(format!("Opened folder {}", root_path.display()));
+        self.set_status(format!("Opened folder {}", display_path(&root_path)));
     }
 
     fn refresh_tree(&mut self) {
@@ -944,7 +944,7 @@ impl MarkRushApp {
                     .map(|state| state.reader_line);
                 self.save_settings();
                 self.rebuild_search();
-                self.set_status(format!("Loaded {}", full_path.display()));
+                self.set_status(format!("Loaded {}", display_path(&full_path)));
             }
             Err(error) => {
                 self.set_status(format!("Could not load file: {error}"));
@@ -1142,7 +1142,7 @@ impl MarkRushApp {
 
         if candidate.is_dir() {
             match open::that(&candidate) {
-                Ok(()) => self.set_status(format!("Opened folder {}", candidate.display())),
+                Ok(()) => self.set_status(format!("Opened folder {}", display_path(&candidate))),
                 Err(error) => self.set_status(format!("Could not open folder: {error}")),
             }
             return;
@@ -1586,6 +1586,17 @@ fn is_visible_dir(path: &Path) -> bool {
 
 fn absolute_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn display_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = path.strip_prefix("\\\\?\\") {
+        rest.to_owned()
+    } else {
+        path.into_owned()
+    }
 }
 
 fn install_panic_hook() {
