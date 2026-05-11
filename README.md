@@ -26,6 +26,7 @@ The active implementation is a cross-platform Rust desktop app built with egui/e
 - Follow local file links, local folder links, heading anchors, and external URLs.
 - Adjust rendered/editing font family and document font size from the top toolbar.
 - Persist theme, wrap mode, document font, window size, and rendered scroll position.
+- On first launch, start at one-quarter of the current screen area, then remember user resizing.
 - Includes the Venice-style theme set plus High Contrast.
 - Bundles redistributable document fonts: Noto Sans, Noto Serif, Lora, Poppins, and Roboto Mono.
 - Writes crash logs to the platform app config directory.

@@ -21,21 +21,20 @@ const MIDDLE_SCROLL_MAX_SPEED: f32 = 80.0;
 const DEFAULT_DOCUMENT_FONT_FAMILY: &str = "System UI";
 const DEFAULT_DOCUMENT_FONT_SIZE: f32 = 15.0;
 const FONT_SIZE_OPTIONS: &[f32] = &[12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0];
+const MIN_WINDOW_SIZE: [f32; 2] = [840.0, 520.0];
+const FIRST_LAUNCH_WINDOW_SCREEN_SCALE: f32 = 0.5;
 const UNWRAPPED_DOCUMENT_WIDTH: f32 = 12_000.0;
 
 fn main() -> eframe::Result {
     install_panic_hook();
     let settings = load_settings(settings_path().as_deref());
-    let window_size = [
-        settings.window_width.unwrap_or(1180.0),
-        settings.window_height.unwrap_or(760.0),
-    ];
+    let window_size = startup_window_size(&settings);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MarkRush")
             .with_inner_size(window_size)
-            .with_min_inner_size([840.0, 520.0])
+            .with_min_inner_size(MIN_WINDOW_SIZE)
             .with_icon(load_app_icon()),
         ..Default::default()
     };
@@ -50,6 +49,27 @@ fn main() -> eframe::Result {
 fn load_app_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/MarkRush-256.png"))
         .expect("embedded app icon PNG should be valid")
+}
+
+fn startup_window_size(settings: &AppSettings) -> [f32; 2] {
+    saved_window_size(settings).unwrap_or(MIN_WINDOW_SIZE)
+}
+
+fn saved_window_size(settings: &AppSettings) -> Option<[f32; 2]> {
+    let width = settings.window_width?;
+    let height = settings.window_height?;
+
+    (width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0).then_some([
+        width.max(MIN_WINDOW_SIZE[0]),
+        height.max(MIN_WINDOW_SIZE[1]),
+    ])
+}
+
+fn first_launch_window_size(monitor_size: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(
+        (monitor_size.x * FIRST_LAUNCH_WINDOW_SCREEN_SCALE).max(MIN_WINDOW_SIZE[0]),
+        (monitor_size.y * FIRST_LAUNCH_WINDOW_SCREEN_SCALE).max(MIN_WINDOW_SIZE[1]),
+    )
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -224,6 +244,12 @@ struct MiddleDragScroll {
     start_pos: egui::Pos2,
 }
 
+enum InitialWindowFit {
+    NotNeeded,
+    PendingResize,
+    PendingSave { size: egui::Vec2, frames: u8 },
+}
+
 struct MarkRushApp {
     settings: AppSettings,
     settings_path: Option<PathBuf>,
@@ -245,6 +271,7 @@ struct MarkRushApp {
     pending_scroll_line: Option<usize>,
     focus_search: bool,
     middle_drag_scroll: Option<MiddleDragScroll>,
+    initial_window_fit: InitialWindowFit,
 }
 
 impl MarkRushApp {
@@ -255,6 +282,11 @@ impl MarkRushApp {
         let settings_path = settings_path();
         let settings = load_settings(settings_path.as_deref());
         let theme_index = theme_index_by_name(&settings.theme_name);
+        let initial_window_fit = if saved_window_size(&settings).is_some() {
+            InitialWindowFit::NotNeeded
+        } else {
+            InitialWindowFit::PendingResize
+        };
 
         let mut app = Self {
             settings,
@@ -277,6 +309,7 @@ impl MarkRushApp {
             pending_scroll_line: None,
             focus_search: false,
             middle_drag_scroll: None,
+            initial_window_fit,
         };
 
         app.apply_startup_target();
@@ -326,7 +359,10 @@ impl MarkRushApp {
     fn draw(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.apply_theme(ui.ctx());
         self.update_window_title(ui.ctx());
-        self.remember_window_size(ui.ctx());
+        self.apply_initial_window_fit(ui.ctx());
+        if !self.initial_window_fit_blocks_size_save() {
+            self.remember_window_size(ui.ctx());
+        }
         self.handle_shortcuts(ui);
 
         let full_rect = ui.max_rect();
@@ -1409,6 +1445,60 @@ impl MarkRushApp {
         if let Ok(json) = serde_json::to_string_pretty(&self.settings) {
             let _ = fs::write(path, json);
         }
+    }
+
+    fn apply_initial_window_fit(&mut self, ctx: &egui::Context) {
+        let state = std::mem::replace(&mut self.initial_window_fit, InitialWindowFit::NotNeeded);
+        match state {
+            InitialWindowFit::NotNeeded => {}
+            InitialWindowFit::PendingResize => {
+                let Some(monitor_size) = ctx.input(|input| input.viewport().monitor_size) else {
+                    self.initial_window_fit = InitialWindowFit::PendingResize;
+                    ctx.request_repaint();
+                    return;
+                };
+
+                if monitor_size.x <= 1.0 || monitor_size.y <= 1.0 {
+                    self.initial_window_fit = InitialWindowFit::PendingResize;
+                    ctx.request_repaint();
+                    return;
+                }
+
+                let size = first_launch_window_size(monitor_size);
+                let position = egui::pos2(
+                    ((monitor_size.x - size.x) / 2.0).max(0.0),
+                    ((monitor_size.y - size.y) / 2.0).max(0.0),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                self.initial_window_fit = InitialWindowFit::PendingSave { size, frames: 0 };
+                ctx.request_repaint();
+            }
+            InitialWindowFit::PendingSave { size, frames } => {
+                let Some(inner_rect) = ctx.input(|input| input.viewport().inner_rect) else {
+                    self.initial_window_fit = InitialWindowFit::PendingSave { size, frames };
+                    ctx.request_repaint();
+                    return;
+                };
+
+                let actual_size = inner_rect.size();
+                if ((actual_size.x - size.x).abs() <= 2.0 && (actual_size.y - size.y).abs() <= 2.0)
+                    || frames >= 5
+                {
+                    self.initial_window_fit = InitialWindowFit::NotNeeded;
+                } else {
+                    self.initial_window_fit = InitialWindowFit::PendingSave {
+                        size,
+                        frames: frames + 1,
+                    };
+                    ctx.request_repaint();
+                }
+            }
+        }
+    }
+
+    fn initial_window_fit_blocks_size_save(&self) -> bool {
+        !matches!(self.initial_window_fit, InitialWindowFit::NotNeeded)
     }
 
     fn remember_window_size(&mut self, ctx: &egui::Context) {
