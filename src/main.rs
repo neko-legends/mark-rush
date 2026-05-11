@@ -230,15 +230,40 @@ enum RenderKind {
     Paragraph,
     Quote,
     List,
-    Code,
+    CodeBlock,
     Rule,
     Table,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodeFence {
+    Backtick,
+    Tilde,
 }
 
 #[derive(Clone)]
 struct RenderLine {
     text: String,
     kind: RenderKind,
+    language: Option<String>,
+}
+
+impl RenderLine {
+    fn new(text: impl Into<String>, kind: RenderKind) -> Self {
+        Self {
+            text: text.into(),
+            kind,
+            language: None,
+        }
+    }
+
+    fn code_block(text: impl Into<String>, language: Option<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: RenderKind::CodeBlock,
+            language,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -860,10 +885,18 @@ impl MarkRushApp {
         .content_margin(egui::Margin::symmetric(18, 12))
         .auto_shrink([false, false]);
         let wrap = self.settings.word_wrap;
-        let (output, reader_line) = if wrap {
-            let reader_width = reader_estimate_width(ui.available_width());
+        let has_code_blocks = self
+            .render_lines
+            .iter()
+            .any(|line| matches!(line.kind, RenderKind::CodeBlock));
+        let (output, reader_line) = if wrap || has_code_blocks {
+            let reader_width = if wrap {
+                reader_estimate_width(ui.available_width())
+            } else {
+                UNWRAPPED_DOCUMENT_WIDTH
+            };
             let estimated_heights =
-                estimate_reader_heights(&self.render_lines, font_size, reader_width);
+                estimate_reader_heights(&self.render_lines, font_size, reader_width, wrap);
             let total_height = total_reader_height(&estimated_heights);
             if let Some(offset) =
                 pending_scroll_line.map(|line| reader_offset_for_line(&estimated_heights, line))
@@ -872,6 +905,10 @@ impl MarkRushApp {
             }
 
             let output = scroll.show_viewport(ui, |ui, viewport| {
+                if !wrap {
+                    ui.set_min_width(UNWRAPPED_DOCUMENT_WIDTH);
+                }
+
                 let overscan = reader_scroll_overscan(viewport.height());
                 let (start, end, top_space, bottom_space) =
                     reader_virtual_range(&estimated_heights, viewport, overscan, total_height);
@@ -1820,17 +1857,8 @@ fn draw_render_line(
                     );
                 });
             }
-            RenderKind::Code => {
-                egui::Frame::new()
-                    .fill(theme.code)
-                    .inner_margin(egui::Margin::symmetric(6, 2))
-                    .show(ui, |ui| {
-                        ui.monospace(
-                            egui::RichText::new(&line.text)
-                                .font(egui::FontId::new(font_size, font_family.clone()))
-                                .color(text_color),
-                        );
-                    });
+            RenderKind::CodeBlock => {
+                draw_code_block(ui, line, theme, text_color, wrap, font_size);
             }
             RenderKind::Rule => {
                 ui.separator();
@@ -1850,6 +1878,65 @@ fn draw_render_line(
     });
 
     clicked_link
+}
+
+fn draw_code_block(
+    ui: &mut egui::Ui,
+    line: &RenderLine,
+    theme: &AppTheme,
+    text_color: egui::Color32,
+    wrap: bool,
+    font_size: f32,
+) {
+    egui::Frame::new()
+        .fill(theme.code)
+        .stroke(egui::Stroke::new(1.0, theme.border))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let label = line.language.as_deref().unwrap_or("code");
+                ui.add_sized(
+                    [(ui.available_width() - 36.0).max(0.0), 22.0],
+                    egui::Label::new(
+                        egui::RichText::new(label)
+                            .size(12.0)
+                            .strong()
+                            .color(theme.muted),
+                    )
+                    .truncate(),
+                );
+
+                let copy_response = ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("📋").size(13.0))
+                            .fill(theme.button)
+                            .min_size(egui::vec2(28.0, 22.0)),
+                    )
+                    .on_hover_text("Copy code");
+                if copy_response.clicked() {
+                    ui.ctx().copy_text(line.text.clone());
+                }
+            });
+
+            ui.add_space(4.0);
+
+            let code_text = if line.text.is_empty() {
+                " "
+            } else {
+                line.text.as_str()
+            };
+            let label = egui::Label::new(
+                egui::RichText::new(code_text)
+                    .font(egui::FontId::new(font_size, egui::FontFamily::Monospace))
+                    .color(text_color),
+            );
+            if wrap {
+                ui.add(label.wrap());
+            } else {
+                ui.add(label);
+            }
+        });
 }
 
 fn themed_button(ui: &mut egui::Ui, label: &str, theme: &AppTheme) -> egui::Response {
@@ -2021,40 +2108,90 @@ fn next_markdown_link(text: &str) -> Option<(&str, &str, &str, &str)> {
 
 fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let mut in_code_block = false;
+    let mut code_fence = None;
+    let mut code_language = None;
+    let mut code_lines = Vec::new();
 
     for raw_line in markdown.lines() {
         let trimmed = raw_line.trim();
 
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_code_block = !in_code_block;
-            lines.push(RenderLine {
-                text: raw_line.to_owned(),
-                kind: RenderKind::Code,
-            });
+        if let Some(fence) = code_fence {
+            if is_closing_code_fence(trimmed, fence) {
+                lines.push(RenderLine::code_block(
+                    code_lines.join("\n"),
+                    code_language.take(),
+                ));
+                code_lines.clear();
+                code_fence = None;
+            } else {
+                push_code_block_line(&mut code_lines, raw_line);
+            }
             continue;
         }
 
-        if in_code_block {
-            lines.push(RenderLine {
-                text: raw_line.to_owned(),
-                kind: RenderKind::Code,
-            });
+        if let Some((fence, language)) = parse_code_fence(trimmed) {
+            code_fence = Some(fence);
+            code_language = language;
+            code_lines.clear();
             continue;
         }
 
         let (text, kind) = classify_markdown_line(raw_line);
-        lines.push(RenderLine { text, kind });
+        lines.push(RenderLine::new(text, kind));
+    }
+
+    if code_fence.is_some() {
+        lines.push(RenderLine::code_block(code_lines.join("\n"), code_language));
     }
 
     if markdown.ends_with('\n') {
-        lines.push(RenderLine {
-            text: String::new(),
-            kind: RenderKind::Blank,
-        });
+        lines.push(RenderLine::new(String::new(), RenderKind::Blank));
     }
 
     lines
+}
+
+fn push_code_block_line(code_lines: &mut Vec<String>, line: &str) {
+    code_lines.push(line.to_owned());
+}
+
+fn parse_code_fence(line: &str) -> Option<(CodeFence, Option<String>)> {
+    let fence = if line.starts_with("```") {
+        CodeFence::Backtick
+    } else if line.starts_with("~~~") {
+        CodeFence::Tilde
+    } else {
+        return None;
+    };
+
+    let marker = code_fence_marker(fence);
+    let marker_len = line.bytes().take_while(|byte| *byte == marker).count();
+    if marker_len < 3 {
+        return None;
+    }
+
+    let language = line[marker_len..]
+        .trim()
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    Some((fence, language))
+}
+
+fn is_closing_code_fence(line: &str, fence: CodeFence) -> bool {
+    let marker = code_fence_marker(fence);
+    let marker_len = line.bytes().take_while(|byte| *byte == marker).count();
+
+    marker_len >= 3 && line[marker_len..].trim().is_empty()
+}
+
+fn code_fence_marker(fence: CodeFence) -> u8 {
+    match fence {
+        CodeFence::Backtick => b'`',
+        CodeFence::Tilde => b'~',
+    }
 }
 
 fn classify_markdown_line(line: &str) -> (String, RenderKind) {
@@ -2360,15 +2497,48 @@ fn reader_estimate_width(available_width: f32) -> f32 {
     (available_width - READER_HORIZONTAL_PADDING).max(180.0)
 }
 
-fn estimate_reader_heights(lines: &[RenderLine], font_size: f32, available_width: f32) -> Vec<f32> {
+fn estimate_reader_heights(
+    lines: &[RenderLine],
+    font_size: f32,
+    available_width: f32,
+    wrap: bool,
+) -> Vec<f32> {
     lines
         .iter()
-        .map(|line| estimate_reader_line_height(line, font_size, available_width))
+        .map(|line| estimate_reader_line_height(line, font_size, available_width, wrap))
         .collect()
 }
 
-fn estimate_reader_line_height(line: &RenderLine, font_size: f32, available_width: f32) -> f32 {
+fn estimate_reader_line_height(
+    line: &RenderLine,
+    font_size: f32,
+    available_width: f32,
+    wrap: bool,
+) -> f32 {
     let row_height = reader_row_height(font_size);
+
+    if !wrap {
+        return match line.kind {
+            RenderKind::Blank => (row_height * 0.65).ceil().max(10.0),
+            RenderKind::Heading(level) => {
+                let heading_size = match level {
+                    1 => font_size + 7.0,
+                    2 => font_size + 4.0,
+                    3 => font_size + 2.0,
+                    _ => font_size + 0.5,
+                };
+                reader_row_height(heading_size)
+            }
+            RenderKind::CodeBlock => {
+                estimate_code_block_height(&line.text, font_size, available_width, wrap)
+            }
+            RenderKind::Rule
+            | RenderKind::Quote
+            | RenderKind::List
+            | RenderKind::Paragraph
+            | RenderKind::Table => row_height,
+        };
+    }
 
     match line.kind {
         RenderKind::Blank => (row_height * 0.65).ceil().max(10.0),
@@ -2386,9 +2556,8 @@ fn estimate_reader_line_height(line: &RenderLine, font_size: f32, available_widt
         RenderKind::Quote => {
             estimate_wrapped_text_height(&line.text, font_size, available_width - 28.0, 6.0)
         }
-        RenderKind::Code => {
-            estimate_wrapped_text_height(&line.text, font_size, available_width - 12.0, 8.0)
-                .max(row_height)
+        RenderKind::CodeBlock => {
+            estimate_code_block_height(&line.text, font_size, available_width, wrap)
         }
         RenderKind::List | RenderKind::Paragraph | RenderKind::Table => {
             estimate_wrapped_text_height(&line.text, font_size, available_width, 6.0)
@@ -2411,6 +2580,29 @@ fn estimate_wrapped_text_height(
     let visual_lines = (character_count / chars_per_visual_line).ceil().max(1.0);
 
     (visual_lines * (font_size + 7.0) + vertical_padding).ceil()
+}
+
+fn estimate_code_block_height(text: &str, font_size: f32, available_width: f32, wrap: bool) -> f32 {
+    let average_char_width = (font_size * 0.6).max(7.0);
+    let chars_per_visual_line = (available_width.max(120.0) / average_char_width)
+        .floor()
+        .max(8.0);
+    let visual_lines = if text.is_empty() {
+        1.0
+    } else {
+        text.lines()
+            .map(|line| {
+                let character_count = line.chars().count().max(1) as f32;
+                if wrap {
+                    (character_count / chars_per_visual_line).ceil().max(1.0)
+                } else {
+                    1.0
+                }
+            })
+            .sum()
+    };
+
+    (32.0 + visual_lines * (font_size + 7.0) + 20.0).ceil()
 }
 
 fn total_reader_height(heights: &[f32]) -> f32 {
@@ -2620,6 +2812,42 @@ fn load_settings(path: Option<&Path>) -> AppSettings {
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fenced_code_blocks_hide_fence_markers() {
+        let lines = parse_markdown_lines("Before\n```text\nalpha\nbeta\n```\nAfter");
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "Before");
+        assert!(matches!(lines[1].kind, RenderKind::CodeBlock));
+        assert_eq!(lines[1].language.as_deref(), Some("text"));
+        assert_eq!(lines[1].text, "alpha\nbeta");
+        assert_eq!(lines[2].text, "After");
+    }
+
+    #[test]
+    fn unclosed_fenced_code_block_still_renders_as_code() {
+        let lines = parse_markdown_lines("```json\n{\"ok\":true}");
+
+        assert_eq!(lines.len(), 1);
+        assert!(matches!(lines[0].kind, RenderKind::CodeBlock));
+        assert_eq!(lines[0].language.as_deref(), Some("json"));
+        assert_eq!(lines[0].text, "{\"ok\":true}");
+    }
+
+    #[test]
+    fn fenced_code_blocks_preserve_blank_lines() {
+        let lines = parse_markdown_lines("```\n\nalpha\n\n```");
+
+        assert_eq!(lines.len(), 1);
+        assert!(matches!(lines[0].kind, RenderKind::CodeBlock));
+        assert_eq!(lines[0].text, "\nalpha\n");
+    }
 }
 
 fn theme_index_by_name(name: &str) -> usize {
