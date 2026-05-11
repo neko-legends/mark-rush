@@ -79,7 +79,7 @@ fn build_version() -> BuildVersion {
     );
     let date = format!("{:04}-{:02}-{:02}", time.year, time.month, time.day);
     let version = format!("{}.{}.{}+{}", time.year, time.month, patch, metadata);
-    let label = format!("ver {date} - {metadata}");
+    let label = format!("ver {date} · {metadata}");
 
     BuildVersion {
         version,

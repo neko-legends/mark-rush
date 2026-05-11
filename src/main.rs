@@ -15,6 +15,7 @@ use eframe::egui::Widget;
 use serde::{Deserialize, Serialize};
 
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mdx", "mkd", "rmd"];
+const APP_BUILD_LABEL: &str = env!("MARKRUSH_BUILD_LABEL");
 const MAX_STORED_STATUS: usize = 180;
 const MAX_STORED_FILE_VIEW_STATES: usize = 250;
 const MIDDLE_SCROLL_DEAD_ZONE: f32 = 8.0;
@@ -839,14 +840,17 @@ impl MarkRushApp {
             .inner_margin(egui::Margin::symmetric(12, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} lines, {} chars",
-                            document_line_count(&self.document_text),
-                            self.document_text.chars().count()
-                        ))
-                        .color(theme.muted),
-                    );
+                    ui.label(egui::RichText::new(APP_BUILD_LABEL).color(theme.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} lines, {} chars",
+                                document_line_count(&self.document_text),
+                                self.document_text.chars().count()
+                            ))
+                            .color(theme.muted),
+                        );
+                    });
                 });
             });
     }
@@ -1937,7 +1941,7 @@ fn draw_code_block(
                                 .fill(theme.button)
                                 .min_size(egui::vec2(22.0, 20.0)),
                         )
-                        .on_hover_text("Copy code");
+                        .on_hover_text("Copy text block");
                     if copy_response.clicked() {
                         ui.ctx()
                             .copy_text(line.copy_text.clone().unwrap_or_else(|| line.text.clone()));
