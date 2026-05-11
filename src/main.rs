@@ -13,7 +13,8 @@ const MAX_STORED_STATUS: usize = 180;
 const MAX_STORED_FILE_VIEW_STATES: usize = 250;
 const MIDDLE_SCROLL_DEAD_ZONE: f32 = 8.0;
 const MIDDLE_SCROLL_MAX_SPEED: f32 = 80.0;
-const READER_ROW_HEIGHT: f32 = 23.0;
+const DEFAULT_DOCUMENT_FONT_SIZE: f32 = 15.0;
+const FONT_SIZE_OPTIONS: &[f32] = &[12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0];
 const UNWRAPPED_DOCUMENT_WIDTH: f32 = 12_000.0;
 
 fn main() -> eframe::Result {
@@ -40,11 +41,13 @@ fn main() -> eframe::Result {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct AppSettings {
     last_root_path: Option<PathBuf>,
     last_file_path: Option<PathBuf>,
     theme_name: String,
     word_wrap: bool,
+    document_font_size: f32,
     window_width: Option<f32>,
     window_height: Option<f32>,
     file_view_states: HashMap<PathBuf, FileViewState>,
@@ -57,6 +60,7 @@ impl Default for AppSettings {
             last_file_path: None,
             theme_name: "EVA Dark".to_owned(),
             word_wrap: true,
+            document_font_size: DEFAULT_DOCUMENT_FONT_SIZE,
             window_width: None,
             window_height: None,
             file_view_states: HashMap::new(),
@@ -543,6 +547,25 @@ impl MarkRushApp {
                             self.save_settings();
                         }
 
+                        let mut selected_font_size = self.document_font_size();
+                        egui::ComboBox::from_id_salt("document-font-size-picker")
+                            .width(82.0)
+                            .selected_text(format!("{selected_font_size:.0}px"))
+                            .show_ui(ui, |ui| {
+                                for size in FONT_SIZE_OPTIONS {
+                                    ui.selectable_value(
+                                        &mut selected_font_size,
+                                        *size,
+                                        format!("{size:.0}px"),
+                                    );
+                                }
+                            });
+
+                        if (selected_font_size - self.document_font_size()).abs() > f32::EPSILON {
+                            self.settings.document_font_size = selected_font_size;
+                            self.save_settings();
+                        }
+
                         let can_save =
                             self.current_file.is_some() && (self.dirty || self.edit_mode);
                         if ui
@@ -701,10 +724,12 @@ impl MarkRushApp {
             .map(|search_match| search_match.line_index);
 
         let current_match_line = current_match_line.or(self.pending_scroll_line);
+        let font_size = self.document_font_size();
+        let row_height = reader_row_height(font_size);
         let scroll_offset = self
             .pending_scroll_line
             .take()
-            .map(|line| line as f32 * READER_ROW_HEIGHT);
+            .map(|line| line as f32 * row_height);
         let mut clicked_link = None;
 
         let file_scroll_id = egui::Id::new("reader-scroll").with(
@@ -726,30 +751,27 @@ impl MarkRushApp {
         }
 
         let wrap = self.settings.word_wrap;
-        let output = scroll.show_rows(
-            ui,
-            READER_ROW_HEIGHT,
-            self.render_lines.len(),
-            |ui, row_range| {
-                if !wrap {
-                    ui.set_min_width(UNWRAPPED_DOCUMENT_WIDTH);
-                }
+        let output = scroll.show_rows(ui, row_height, self.render_lines.len(), |ui, row_range| {
+            if !wrap {
+                ui.set_min_width(UNWRAPPED_DOCUMENT_WIDTH);
+            }
 
-                for index in row_range {
-                    if let Some(line) = self.render_lines.get(index) {
-                        let is_match = current_match_line == Some(index);
-                        if let Some(target) = draw_render_line(ui, line, &theme, is_match, wrap) {
-                            clicked_link = Some(target);
-                        }
+            for index in row_range {
+                if let Some(line) = self.render_lines.get(index) {
+                    let is_match = current_match_line == Some(index);
+                    if let Some(target) =
+                        draw_render_line(ui, line, &theme, is_match, wrap, font_size)
+                    {
+                        clicked_link = Some(target);
                     }
                 }
-            },
-        );
+            }
+        });
         self.apply_middle_mouse_scroll(ui, &output, !self.settings.word_wrap, true);
 
         if let Some(path) = self.current_file.clone() {
             let state = FileViewState {
-                reader_line: (output.state.offset.y / READER_ROW_HEIGHT).floor().max(0.0) as usize,
+                reader_line: (output.state.offset.y / row_height).floor().max(0.0) as usize,
             };
 
             if self.settings.file_view_states.get(&path) != Some(&state) {
@@ -765,6 +787,8 @@ impl MarkRushApp {
     }
 
     fn draw_editor(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme().clone();
+
         if self.current_file.is_none() {
             ui.centered_and_justified(|ui| {
                 ui.label("Open a Markdown file to edit");
@@ -777,6 +801,7 @@ impl MarkRushApp {
         } else {
             UNWRAPPED_DOCUMENT_WIDTH
         };
+        let font_size = self.document_font_size();
 
         let edit = egui::TextEdit::multiline(&mut self.document_text)
             .id(egui::Id::new("editor").with(
@@ -786,6 +811,8 @@ impl MarkRushApp {
                     .unwrap_or_default(),
             ))
             .desired_width(desired_width)
+            .font(egui::FontId::new(font_size, egui::FontFamily::Monospace))
+            .text_color(theme.text)
             .code_editor()
             .lock_focus(true);
 
@@ -1175,6 +1202,10 @@ impl MarkRushApp {
         self.status = status;
     }
 
+    fn document_font_size(&self) -> f32 {
+        sanitize_document_font_size(self.settings.document_font_size)
+    }
+
     fn update_window_title(&self, ctx: &egui::Context) {
         let marker = if self.dirty { "*" } else { "" };
         let file_name = self
@@ -1487,6 +1518,7 @@ fn draw_render_line(
     theme: &AppTheme,
     is_match: bool,
     wrap: bool,
+    font_size: f32,
 ) -> Option<String> {
     let mut clicked_link = None;
     let fill = if is_match {
@@ -1508,10 +1540,10 @@ fn draw_render_line(
             }
             RenderKind::Heading(level) => {
                 let size = match level {
-                    1 => 22.0,
-                    2 => 19.0,
-                    3 => 17.0,
-                    _ => 15.5,
+                    1 => font_size + 7.0,
+                    2 => font_size + 4.0,
+                    3 => font_size + 2.0,
+                    _ => font_size + 0.5,
                 };
                 ui.label(
                     egui::RichText::new(&line.text)
@@ -1522,8 +1554,9 @@ fn draw_render_line(
             }
             RenderKind::Quote => {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("|").color(theme.accent));
-                    clicked_link = draw_inline_segments(ui, &line.text, theme, theme.muted, wrap);
+                    ui.label(egui::RichText::new("|").size(font_size).color(theme.accent));
+                    clicked_link =
+                        draw_inline_segments(ui, &line.text, theme, theme.muted, wrap, font_size);
                 });
             }
             RenderKind::Code => {
@@ -1531,14 +1564,19 @@ fn draw_render_line(
                     .fill(theme.code)
                     .inner_margin(egui::Margin::symmetric(6, 2))
                     .show(ui, |ui| {
-                        ui.monospace(egui::RichText::new(&line.text).color(text_color));
+                        ui.monospace(
+                            egui::RichText::new(&line.text)
+                                .size(font_size)
+                                .color(text_color),
+                        );
                     });
             }
             RenderKind::Rule => {
                 ui.separator();
             }
             RenderKind::List | RenderKind::Table | RenderKind::Paragraph => {
-                clicked_link = draw_inline_segments(ui, &line.text, theme, text_color, wrap);
+                clicked_link =
+                    draw_inline_segments(ui, &line.text, theme, text_color, wrap, font_size);
             }
         }
     });
@@ -1556,6 +1594,7 @@ fn draw_inline_segments(
     theme: &AppTheme,
     text_color: egui::Color32,
     wrap: bool,
+    font_size: f32,
 ) -> Option<String> {
     let mut clicked_link = None;
 
@@ -1563,10 +1602,14 @@ fn draw_inline_segments(
         let mut remaining = text;
         while let Some((before, label, target, after)) = next_markdown_link(remaining) {
             if !before.is_empty() {
-                draw_plain_inline(ui, before, theme, text_color);
+                draw_plain_inline(ui, before, theme, text_color, font_size);
             }
 
-            let response = ui.link(egui::RichText::new(label).color(theme.accent_2));
+            let response = ui.link(
+                egui::RichText::new(label)
+                    .size(font_size)
+                    .color(theme.accent_2),
+            );
             if response.clicked() {
                 clicked_link = Some(target.to_owned());
             }
@@ -1575,7 +1618,7 @@ fn draw_inline_segments(
         }
 
         if !remaining.is_empty() {
-            draw_plain_inline(ui, remaining, theme, text_color);
+            draw_plain_inline(ui, remaining, theme, text_color, font_size);
         }
     };
 
@@ -1588,7 +1631,13 @@ fn draw_inline_segments(
     clicked_link
 }
 
-fn draw_plain_inline(ui: &mut egui::Ui, text: &str, theme: &AppTheme, text_color: egui::Color32) {
+fn draw_plain_inline(
+    ui: &mut egui::Ui,
+    text: &str,
+    theme: &AppTheme,
+    text_color: egui::Color32,
+    font_size: f32,
+) {
     let mut remaining = text;
 
     while !remaining.is_empty() {
@@ -1608,35 +1657,61 @@ fn draw_plain_inline(ui: &mut egui::Ui, text: &str, theme: &AppTheme, text_color
             .min_by_key(|(index, _)| *index);
 
         let Some((index, marker)) = marker else {
-            ui.label(egui::RichText::new(remaining).color(text_color));
+            ui.label(
+                egui::RichText::new(remaining)
+                    .size(font_size)
+                    .color(text_color),
+            );
             break;
         };
 
         if index > 0 {
-            ui.label(egui::RichText::new(&remaining[..index]).color(text_color));
+            ui.label(
+                egui::RichText::new(&remaining[..index])
+                    .size(font_size)
+                    .color(text_color),
+            );
         }
 
         let after_marker = &remaining[index + marker.len()..];
         let Some(end) = after_marker.find(marker) else {
-            ui.label(egui::RichText::new(&remaining[index..]).color(text_color));
+            ui.label(
+                egui::RichText::new(&remaining[index..])
+                    .size(font_size)
+                    .color(text_color),
+            );
             break;
         };
 
         let inner = &after_marker[..end];
         match marker {
             "**" => {
-                ui.label(egui::RichText::new(inner).strong().color(text_color));
+                ui.label(
+                    egui::RichText::new(inner)
+                        .strong()
+                        .size(font_size)
+                        .color(text_color),
+                );
             }
             "`" => {
                 egui::Frame::new()
                     .fill(theme.code)
                     .inner_margin(egui::Margin::symmetric(4, 1))
                     .show(ui, |ui| {
-                        ui.monospace(egui::RichText::new(inner).color(theme.accent));
+                        ui.monospace(
+                            egui::RichText::new(inner)
+                                .size(font_size)
+                                .color(theme.accent),
+                        );
                     });
             }
             "*" => {
-                ui.label(egui::RichText::new(inner).italics().color(text_color));
+                ui.label(
+                    egui::RichText::new(inner)
+                        .italics()
+                        .size(font_size)
+                        .color(text_color),
+                );
             }
             _ => unreachable!(),
         }
@@ -1910,6 +1985,21 @@ fn middle_scroll_step(distance: f32) -> f32 {
 
     let speed = ((magnitude - MIDDLE_SCROLL_DEAD_ZONE) / 10.0).powf(1.2) * 4.0;
     distance.signum() * speed.min(MIDDLE_SCROLL_MAX_SPEED)
+}
+
+fn sanitize_document_font_size(size: f32) -> f32 {
+    if FONT_SIZE_OPTIONS
+        .iter()
+        .any(|option| (*option - size).abs() < f32::EPSILON)
+    {
+        size
+    } else {
+        DEFAULT_DOCUMENT_FONT_SIZE
+    }
+}
+
+fn reader_row_height(font_size: f32) -> f32 {
+    (font_size + 10.0).ceil()
 }
 
 fn document_line_count(text: &str) -> usize {
