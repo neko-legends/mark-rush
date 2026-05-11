@@ -31,35 +31,27 @@ The active implementation is a cross-platform Rust desktop app built with egui/e
 - Bundles redistributable document fonts: Noto Sans, Noto Serif, Lora, Poppins, and Roboto Mono.
 - Writes crash logs to the platform app config directory.
 
-## Build For Agents
+## Build From Source
 
-Work from the repository root:
+Clone the repo or open it in any directory, then run commands from the repository root.
+
+Example:
 
 ```powershell
-cd D:\forPublic\MarkRush
+git clone https://github.com/flashosophy/MarkRush.git
+cd MarkRush
 ```
 
-Rust is required. If `cargo` is on `PATH`, use:
+Install Rust from [rustup.rs](https://rustup.rs/), then use:
 
 ```powershell
-cargo fmt
-cargo check
 cargo build --release
 ```
 
-On this Windows machine, Cargo may need to be called by full path:
-
-```powershell
-$Cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
-& $Cargo fmt
-& $Cargo check
-& $Cargo build --release
-```
-
-The portable Windows executable is produced at:
+The release executable is produced under:
 
 ```text
-target/release/markrush.exe
+target/release/
 ```
 
 For a portable release package on Windows, use:
@@ -77,12 +69,19 @@ dist/
 For local testing:
 
 ```powershell
+cargo run
+```
+
+On Windows, the direct release executable is:
+
+```powershell
 .\target\release\markrush.exe
 ```
 
-Notes for agents:
+## Contributor Notes
 
-- Prefer `cargo check` for quick validation and `cargo build --release` before handing off a Windows portable build.
+- Prefer `cargo fmt` and `cargo check` for quick validation before committing code changes.
+- Use `cargo build --release` before handing off a direct executable.
 - Prefer `.\Build-Windows.ps1` when preparing a Windows package, because it forces a fresh date/hash build stamp and writes a SHA256 file.
 - The Windows release build uses `build.rs` to embed the app icon and generated version metadata into the `.exe`.
 - The Windows release binary is configured as a GUI app, so double-clicking `target/release/markrush.exe` should not open a blank console.
