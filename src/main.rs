@@ -574,6 +574,19 @@ impl MarkRushApp {
                     );
 
                     ui.horizontal(|ui| {
+                        let file_path = self
+                            .current_file
+                            .as_ref()
+                            .map(|path| display_path(path))
+                            .unwrap_or_default();
+                        ui.add_sized(
+                            [ui.available_width(), 18.0],
+                            egui::Label::new(
+                                egui::RichText::new(file_path).size(12.0).color(theme.muted),
+                            )
+                            .truncate(),
+                        );
+
                         let copy_response = ui
                             .add_enabled(
                                 self.current_file.is_some(),
@@ -588,19 +601,6 @@ impl MarkRushApp {
                                 self.set_status("Copied file path");
                             }
                         }
-
-                        let file_path = self
-                            .current_file
-                            .as_ref()
-                            .map(|path| display_path(path))
-                            .unwrap_or_default();
-                        ui.add_sized(
-                            [ui.available_width(), 18.0],
-                            egui::Label::new(
-                                egui::RichText::new(file_path).size(12.0).color(theme.muted),
-                            )
-                            .truncate(),
-                        );
                     });
 
                     ui.add_space(4.0);
