@@ -1,8 +1,8 @@
 # MarkRush
 
-MarkRush is a fast local Markdown viewer and editor focused on large files and large folders.
+MarkRush is a fast local Markdown viewer and editor. The goal is fast file loading and smooth scrolling for Markdown files with thousands of lines, especially in large local folders where slower editors can lag.
 
-The active implementation is a cross-platform Rust desktop app built with egui/eframe. The original working Windows WPF implementation is preserved in `reference/wpf` as a behavior reference.
+The active implementation is a cross-platform Rust desktop app built with egui/eframe. The original working Windows WPF implementation is preserved in `reference/wpf` only as a behavior reference.
 
 ## Goals
 
@@ -30,19 +30,50 @@ The active implementation is a cross-platform Rust desktop app built with egui/e
 - Bundles redistributable document fonts: Noto Sans, Noto Serif, Lora, Poppins, and Roboto Mono.
 - Writes crash logs to the platform app config directory.
 
-## Build
+## Build For Agents
 
-Install Rust, then run:
-
-```powershell
-cargo run
-```
-
-On this machine, Rust may be installed under:
+Work from the repository root:
 
 ```powershell
-$env:USERPROFILE\.cargo\bin\cargo.exe run
+cd D:\forPublic\MarkRush
 ```
+
+Rust is required. If `cargo` is on `PATH`, use:
+
+```powershell
+cargo fmt
+cargo check
+cargo build --release
+```
+
+On this Windows machine, Cargo may need to be called by full path:
+
+```powershell
+$Cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
+& $Cargo fmt
+& $Cargo check
+& $Cargo build --release
+```
+
+The portable Windows executable is produced at:
+
+```text
+target/release/markrush.exe
+```
+
+For local testing:
+
+```powershell
+.\target\release\markrush.exe
+```
+
+Notes for agents:
+
+- Prefer `cargo check` for quick validation and `cargo build --release` before handing off a Windows portable build.
+- The Windows release build uses `build.rs` and `assets/windows/MarkRush.rc` to embed the app icon into the `.exe`.
+- The Windows release binary is configured as a GUI app, so double-clicking `target/release/markrush.exe` should not open a blank console.
+- If resource embedding fails on Windows, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.
+- Do not treat `reference/wpf` as active source. It is kept only to compare behavior with the original Windows version.
 
 ## Port Status
 
