@@ -480,7 +480,7 @@ impl MarkRushApp {
         ui.painter().rect_filled(rect, 0, theme.panel_alt);
 
         let chrome_gap = 8.0;
-        let topbar_height = 104.0;
+        let topbar_height = 112.0;
         let searchbar_height = 50.0;
         let statusbar_height = 30.0;
         let topbar_rect = egui::Rect::from_min_max(
@@ -573,22 +573,52 @@ impl MarkRushApp {
                         .truncate(),
                     );
 
-                    let file_path = self
-                        .current_file
-                        .as_ref()
-                        .map(|path| display_path(path))
-                        .unwrap_or_default();
-                    ui.add_sized(
-                        [ui.available_width(), 16.0],
-                        egui::Label::new(
-                            egui::RichText::new(file_path).size(12.0).color(theme.muted),
-                        )
-                        .truncate(),
-                    );
+                    ui.horizontal(|ui| {
+                        let copy_response = ui
+                            .add_enabled(
+                                self.current_file.is_some(),
+                                egui::Button::new(egui::RichText::new("📋").size(13.0))
+                                    .fill(theme.button)
+                                    .min_size(egui::vec2(26.0, 22.0)),
+                            )
+                            .on_hover_text("Copy path");
+                        if copy_response.clicked() {
+                            if let Some(path) = &self.current_file {
+                                ui.ctx().copy_text(display_path(path));
+                                self.set_status("Copied file path");
+                            }
+                        }
+
+                        let file_path = self
+                            .current_file
+                            .as_ref()
+                            .map(|path| display_path(path))
+                            .unwrap_or_default();
+                        ui.add_sized(
+                            [ui.available_width(), 18.0],
+                            egui::Label::new(
+                                egui::RichText::new(file_path).size(12.0).color(theme.muted),
+                            )
+                            .truncate(),
+                        );
+                    });
 
                     ui.add_space(4.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.draw_topbar_controls(ui, &theme);
+                    ui.horizontal(|ui| {
+                        let mut edit = self.edit_mode;
+                        if ui.checkbox(&mut edit, "Edit").changed() {
+                            self.edit_mode = edit;
+                        }
+
+                        let mut wrap = self.settings.word_wrap;
+                        if ui.checkbox(&mut wrap, "Wrap").changed() {
+                            self.settings.word_wrap = wrap;
+                            self.save_settings();
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.draw_topbar_controls(ui, &theme);
+                        });
                     });
                 });
             });
@@ -642,42 +672,24 @@ impl MarkRushApp {
         }
 
         let can_save = self.current_file.is_some() && (self.dirty || self.edit_mode);
-        if ui
-            .add_enabled(can_save, egui::Button::new("Save").fill(theme.button))
-            .clicked()
-        {
+        if toolbar_icon_button(ui, "💾", "Save", can_save, theme).clicked() {
             self.save_current_file();
         }
 
-        if ui
-            .add_enabled(
-                self.current_file.is_some(),
-                egui::Button::new("Reload").fill(theme.button),
-            )
-            .clicked()
-        {
+        if toolbar_icon_button(ui, "↻", "Reload", self.current_file.is_some(), theme).clicked() {
             if let Some(path) = self.current_file.clone() {
                 self.request_action(PendingAction::OpenFile(path));
             }
         }
 
-        let mut wrap = self.settings.word_wrap;
-        if ui.checkbox(&mut wrap, "Wrap").changed() {
-            self.settings.word_wrap = wrap;
-            self.save_settings();
-        }
-
-        let mut edit = self.edit_mode;
-        if ui.checkbox(&mut edit, "Edit").changed() {
-            self.edit_mode = edit;
-        }
-
-        if ui
-            .add_enabled(
-                self.current_file.is_some(),
-                egui::Button::new("Show").fill(theme.button),
-            )
-            .clicked()
+        if toolbar_icon_button(
+            ui,
+            "📁",
+            "Show in file browser",
+            self.current_file.is_some(),
+            theme,
+        )
+        .clicked()
         {
             if let Some(path) = &self.current_file {
                 if let Err(error) = show_in_file_browser(path) {
@@ -685,19 +697,6 @@ impl MarkRushApp {
                 } else {
                     self.set_status("Opened file in system file browser");
                 }
-            }
-        }
-
-        if ui
-            .add_enabled(
-                self.current_file.is_some(),
-                egui::Button::new("Copy Path").fill(theme.button),
-            )
-            .clicked()
-        {
-            if let Some(path) = &self.current_file {
-                ui.ctx().copy_text(display_path(path));
-                self.set_status("Copied file path");
             }
         }
     }
@@ -1758,6 +1757,22 @@ fn draw_render_line(
 
 fn themed_button(ui: &mut egui::Ui, label: &str, theme: &AppTheme) -> egui::Response {
     ui.add(egui::Button::new(label).fill(theme.button))
+}
+
+fn toolbar_icon_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    tooltip: &str,
+    enabled: bool,
+    theme: &AppTheme,
+) -> egui::Response {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(egui::RichText::new(icon).size(15.0))
+            .fill(theme.button)
+            .min_size(egui::vec2(34.0, 34.0)),
+    )
+    .on_hover_text(tooltip)
 }
 
 fn draw_inline_segments(
