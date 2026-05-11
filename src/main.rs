@@ -1064,7 +1064,7 @@ impl MarkRushApp {
         visuals.widgets.active.fg_stroke.color = theme.text;
         visuals.hyperlink_color = theme.accent_2;
         visuals.selection.bg_fill = theme.accent;
-        visuals.selection.stroke.color = theme.text;
+        visuals.selection.stroke.color = contrast_text_color(theme.accent);
         ctx.set_visuals(visuals);
     }
 
@@ -1217,7 +1217,7 @@ fn show_tree(
         let response = ui.selectable_label(
             selected,
             egui::RichText::new(&entry.name).color(if selected {
-                theme.accent
+                contrast_text_color(theme.accent)
             } else {
                 theme.text
             }),
@@ -1782,4 +1782,15 @@ fn hex(value: &str) -> egui::Color32 {
     let g = u8::from_str_radix(&value[2..4], 16).unwrap_or(0);
     let b = u8::from_str_radix(&value[4..6], 16).unwrap_or(0);
     egui::Color32::from_rgb(r, g, b)
+}
+
+fn contrast_text_color(background: egui::Color32) -> egui::Color32 {
+    let [r, g, b, _] = background.to_array();
+    let luminance = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) / 255.0;
+
+    if luminance > 0.58 {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    }
 }
