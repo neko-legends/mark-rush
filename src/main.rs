@@ -230,7 +230,7 @@ enum RenderKind {
     Paragraph,
     Quote,
     List,
-    CodeBlock,
+    CodeBlock { is_first: bool, is_last: bool },
     Rule,
     Table,
 }
@@ -245,6 +245,7 @@ enum CodeFence {
 struct RenderLine {
     text: String,
     kind: RenderKind,
+    copy_text: Option<String>,
 }
 
 impl RenderLine {
@@ -252,13 +253,20 @@ impl RenderLine {
         Self {
             text: text.into(),
             kind,
+            copy_text: None,
         }
     }
 
-    fn code_block(text: impl Into<String>) -> Self {
+    fn code_block_line(
+        text: impl Into<String>,
+        is_first: bool,
+        is_last: bool,
+        copy_text: Option<String>,
+    ) -> Self {
         Self {
             text: text.into(),
-            kind: RenderKind::CodeBlock,
+            kind: RenderKind::CodeBlock { is_first, is_last },
+            copy_text,
         }
     }
 }
@@ -885,7 +893,7 @@ impl MarkRushApp {
         let has_code_blocks = self
             .render_lines
             .iter()
-            .any(|line| matches!(line.kind, RenderKind::CodeBlock));
+            .any(|line| matches!(line.kind, RenderKind::CodeBlock { .. }));
         let (output, reader_line) = if wrap || has_code_blocks {
             let reader_width = if wrap {
                 reader_estimate_width(ui.available_width())
@@ -1854,7 +1862,7 @@ fn draw_render_line(
                     );
                 });
             }
-            RenderKind::CodeBlock => {
+            RenderKind::CodeBlock { .. } => {
                 draw_code_block(ui, line, theme, text_color, wrap, font_size);
             }
             RenderKind::Rule => {
@@ -1885,11 +1893,23 @@ fn draw_code_block(
     wrap: bool,
     font_size: f32,
 ) {
+    let (is_first, is_last) = match line.kind {
+        RenderKind::CodeBlock { is_first, is_last } => (is_first, is_last),
+        _ => (true, true),
+    };
+    let top_margin = if is_first { 8 } else { 2 };
+    let bottom_margin = if is_last { 8 } else { 2 };
+
     egui::Frame::new()
         .fill(theme.code)
         .stroke(egui::Stroke::new(1.0, theme.border))
         .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .inner_margin(egui::Margin {
+            left: 10,
+            right: 10,
+            top: top_margin,
+            bottom: bottom_margin,
+        })
         .show(ui, |ui| {
             let code_text = if line.text.is_empty() {
                 " "
@@ -1907,19 +1927,22 @@ fn draw_code_block(
                 ui.add(label);
             }
 
-            ui.add_space(6.0);
-            ui.horizontal_centered(|ui| {
-                let copy_response = ui
-                    .add(
-                        egui::Button::new(egui::RichText::new("📋").size(12.0))
-                            .fill(theme.button)
-                            .min_size(egui::vec2(22.0, 20.0)),
-                    )
-                    .on_hover_text("Copy code");
-                if copy_response.clicked() {
-                    ui.ctx().copy_text(line.text.clone());
-                }
-            });
+            if is_last {
+                ui.add_space(6.0);
+                ui.horizontal_centered(|ui| {
+                    let copy_response = ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("📋").size(12.0))
+                                .fill(theme.button)
+                                .min_size(egui::vec2(22.0, 20.0)),
+                        )
+                        .on_hover_text("Copy code");
+                    if copy_response.clicked() {
+                        ui.ctx()
+                            .copy_text(line.copy_text.clone().unwrap_or_else(|| line.text.clone()));
+                    }
+                });
+            }
         });
 }
 
@@ -2100,8 +2123,7 @@ fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
 
         if let Some(fence) = code_fence {
             if is_closing_code_fence(trimmed, fence) {
-                lines.push(RenderLine::code_block(code_lines.join("\n")));
-                code_lines.clear();
+                flush_code_block_lines(&mut lines, &mut code_lines);
                 code_fence = None;
             } else {
                 push_code_block_line(&mut code_lines, raw_line);
@@ -2120,7 +2142,7 @@ fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
     }
 
     if code_fence.is_some() {
-        lines.push(RenderLine::code_block(code_lines.join("\n")));
+        flush_code_block_lines(&mut lines, &mut code_lines);
     }
 
     if markdown.ends_with('\n') {
@@ -2132,6 +2154,31 @@ fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
 
 fn push_code_block_line(code_lines: &mut Vec<String>, line: &str) {
     code_lines.push(line.to_owned());
+}
+
+fn flush_code_block_lines(lines: &mut Vec<RenderLine>, code_lines: &mut Vec<String>) {
+    let copy_text = code_lines.join("\n");
+    if code_lines.is_empty() {
+        lines.push(RenderLine::code_block_line(
+            String::new(),
+            true,
+            true,
+            Some(copy_text),
+        ));
+        return;
+    }
+
+    let last_index = code_lines.len() - 1;
+    for (index, line) in code_lines.iter().enumerate() {
+        let is_last = index == last_index;
+        lines.push(RenderLine::code_block_line(
+            line.clone(),
+            index == 0,
+            is_last,
+            is_last.then(|| copy_text.clone()),
+        ));
+    }
+    code_lines.clear();
 }
 
 fn parse_code_fence(line: &str) -> Option<CodeFence> {
@@ -2501,9 +2548,13 @@ fn estimate_reader_line_height(
                 };
                 reader_row_height(heading_size)
             }
-            RenderKind::CodeBlock => {
-                estimate_code_block_height(&line.text, font_size, available_width, wrap)
-            }
+            RenderKind::CodeBlock { is_last, .. } => estimate_code_block_line_height(
+                &line.text,
+                font_size,
+                available_width,
+                wrap,
+                is_last,
+            ),
             RenderKind::Rule
             | RenderKind::Quote
             | RenderKind::List
@@ -2528,8 +2579,8 @@ fn estimate_reader_line_height(
         RenderKind::Quote => {
             estimate_wrapped_text_height(&line.text, font_size, available_width - 28.0, 6.0)
         }
-        RenderKind::CodeBlock => {
-            estimate_code_block_height(&line.text, font_size, available_width, wrap)
+        RenderKind::CodeBlock { is_last, .. } => {
+            estimate_code_block_line_height(&line.text, font_size, available_width, wrap, is_last)
         }
         RenderKind::List | RenderKind::Paragraph | RenderKind::Table => {
             estimate_wrapped_text_height(&line.text, font_size, available_width, 6.0)
@@ -2554,27 +2605,26 @@ fn estimate_wrapped_text_height(
     (visual_lines * (font_size + 7.0) + vertical_padding).ceil()
 }
 
-fn estimate_code_block_height(text: &str, font_size: f32, available_width: f32, wrap: bool) -> f32 {
+fn estimate_code_block_line_height(
+    text: &str,
+    font_size: f32,
+    available_width: f32,
+    wrap: bool,
+    is_last: bool,
+) -> f32 {
     let average_char_width = (font_size * 0.6).max(7.0);
     let chars_per_visual_line = (available_width.max(120.0) / average_char_width)
         .floor()
         .max(8.0);
-    let visual_lines = if text.is_empty() {
+    let visual_lines = if text.is_empty() || !wrap {
         1.0
     } else {
-        text.lines()
-            .map(|line| {
-                let character_count = line.chars().count().max(1) as f32;
-                if wrap {
-                    (character_count / chars_per_visual_line).ceil().max(1.0)
-                } else {
-                    1.0
-                }
-            })
-            .sum()
+        let character_count = text.chars().count().max(1) as f32;
+        (character_count / chars_per_visual_line).ceil().max(1.0)
     };
+    let copy_button_height = if is_last { 28.0 } else { 0.0 };
 
-    (visual_lines * (font_size + 7.0) + 42.0).ceil()
+    (visual_lines * (font_size + 7.0) + copy_button_height + 14.0).ceil()
 }
 
 fn total_reader_height(heights: &[f32]) -> f32 {
@@ -2794,11 +2844,26 @@ mod tests {
     fn fenced_code_blocks_hide_fence_markers() {
         let lines = parse_markdown_lines("Before\n```text\nalpha\nbeta\n```\nAfter");
 
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
         assert_eq!(lines[0].text, "Before");
-        assert!(matches!(lines[1].kind, RenderKind::CodeBlock));
-        assert_eq!(lines[1].text, "alpha\nbeta");
-        assert_eq!(lines[2].text, "After");
+        assert!(matches!(
+            lines[1].kind,
+            RenderKind::CodeBlock {
+                is_first: true,
+                is_last: false
+            }
+        ));
+        assert!(matches!(
+            lines[2].kind,
+            RenderKind::CodeBlock {
+                is_first: false,
+                is_last: true
+            }
+        ));
+        assert_eq!(lines[1].text, "alpha");
+        assert_eq!(lines[2].text, "beta");
+        assert_eq!(lines[2].copy_text.as_deref(), Some("alpha\nbeta"));
+        assert_eq!(lines[3].text, "After");
     }
 
     #[test]
@@ -2806,17 +2871,40 @@ mod tests {
         let lines = parse_markdown_lines("```json\n{\"ok\":true}");
 
         assert_eq!(lines.len(), 1);
-        assert!(matches!(lines[0].kind, RenderKind::CodeBlock));
+        assert!(matches!(
+            lines[0].kind,
+            RenderKind::CodeBlock {
+                is_first: true,
+                is_last: true
+            }
+        ));
         assert_eq!(lines[0].text, "{\"ok\":true}");
+        assert_eq!(lines[0].copy_text.as_deref(), Some("{\"ok\":true}"));
     }
 
     #[test]
     fn fenced_code_blocks_preserve_blank_lines() {
         let lines = parse_markdown_lines("```\n\nalpha\n\n```");
 
-        assert_eq!(lines.len(), 1);
-        assert!(matches!(lines[0].kind, RenderKind::CodeBlock));
-        assert_eq!(lines[0].text, "\nalpha\n");
+        assert_eq!(lines.len(), 3);
+        assert!(matches!(
+            lines[0].kind,
+            RenderKind::CodeBlock {
+                is_first: true,
+                is_last: false
+            }
+        ));
+        assert_eq!(lines[0].text, "");
+        assert_eq!(lines[1].text, "alpha");
+        assert!(matches!(
+            lines[2].kind,
+            RenderKind::CodeBlock {
+                is_first: false,
+                is_last: true
+            }
+        ));
+        assert_eq!(lines[2].text, "");
+        assert_eq!(lines[2].copy_text.as_deref(), Some("\nalpha\n"));
     }
 }
 
