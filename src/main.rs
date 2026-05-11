@@ -373,6 +373,7 @@ impl MarkRushApp {
                     ui.add_space(8.0);
 
                     egui::ScrollArea::vertical()
+                        .id_salt("sidebar-tree-scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             if let Some(root) = &mut self.root {
@@ -684,7 +685,15 @@ impl MarkRushApp {
             .map(|line| line as f32 * READER_ROW_HEIGHT);
         let mut clicked_link = None;
 
-        let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        let file_scroll_id = egui::Id::new("reader-scroll").with(
+            self.current_file
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+        let mut scroll = egui::ScrollArea::vertical()
+            .id_salt(file_scroll_id)
+            .auto_shrink([false, false]);
         if let Some(offset) = scroll_offset {
             scroll = scroll.vertical_scroll_offset(offset);
         }
@@ -746,13 +755,22 @@ impl MarkRushApp {
             .code_editor()
             .lock_focus(true);
 
+        let editor_scroll_id = egui::Id::new("editor-scroll").with(
+            self.current_file
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+
         let response = if self.settings.word_wrap {
             egui::ScrollArea::vertical()
+                .id_salt(editor_scroll_id.with("wrap"))
                 .auto_shrink([false, false])
                 .show(ui, |ui| ui.add_sized(ui.available_size(), edit))
                 .inner
         } else {
             egui::ScrollArea::both()
+                .id_salt(editor_scroll_id.with("both"))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.add_sized(egui::vec2(desired_width, ui.available_height()), edit)
