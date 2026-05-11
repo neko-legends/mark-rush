@@ -245,7 +245,6 @@ enum CodeFence {
 struct RenderLine {
     text: String,
     kind: RenderKind,
-    language: Option<String>,
 }
 
 impl RenderLine {
@@ -253,15 +252,13 @@ impl RenderLine {
         Self {
             text: text.into(),
             kind,
-            language: None,
         }
     }
 
-    fn code_block(text: impl Into<String>, language: Option<String>) -> Self {
+    fn code_block(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             kind: RenderKind::CodeBlock,
-            language,
         }
     }
 }
@@ -1894,33 +1891,6 @@ fn draw_code_block(
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let label = line.language.as_deref().unwrap_or("code");
-                ui.add_sized(
-                    [(ui.available_width() - 36.0).max(0.0), 22.0],
-                    egui::Label::new(
-                        egui::RichText::new(label)
-                            .size(12.0)
-                            .strong()
-                            .color(theme.muted),
-                    )
-                    .truncate(),
-                );
-
-                let copy_response = ui
-                    .add(
-                        egui::Button::new(egui::RichText::new("📋").size(13.0))
-                            .fill(theme.button)
-                            .min_size(egui::vec2(28.0, 22.0)),
-                    )
-                    .on_hover_text("Copy code");
-                if copy_response.clicked() {
-                    ui.ctx().copy_text(line.text.clone());
-                }
-            });
-
-            ui.add_space(4.0);
-
             let code_text = if line.text.is_empty() {
                 " "
             } else {
@@ -1936,6 +1906,20 @@ fn draw_code_block(
             } else {
                 ui.add(label);
             }
+
+            ui.add_space(6.0);
+            ui.horizontal_centered(|ui| {
+                let copy_response = ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("📋").size(12.0))
+                            .fill(theme.button)
+                            .min_size(egui::vec2(22.0, 20.0)),
+                    )
+                    .on_hover_text("Copy code");
+                if copy_response.clicked() {
+                    ui.ctx().copy_text(line.text.clone());
+                }
+            });
         });
 }
 
@@ -2109,7 +2093,6 @@ fn next_markdown_link(text: &str) -> Option<(&str, &str, &str, &str)> {
 fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     let mut code_fence = None;
-    let mut code_language = None;
     let mut code_lines = Vec::new();
 
     for raw_line in markdown.lines() {
@@ -2117,10 +2100,7 @@ fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
 
         if let Some(fence) = code_fence {
             if is_closing_code_fence(trimmed, fence) {
-                lines.push(RenderLine::code_block(
-                    code_lines.join("\n"),
-                    code_language.take(),
-                ));
+                lines.push(RenderLine::code_block(code_lines.join("\n")));
                 code_lines.clear();
                 code_fence = None;
             } else {
@@ -2129,9 +2109,8 @@ fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
             continue;
         }
 
-        if let Some((fence, language)) = parse_code_fence(trimmed) {
+        if let Some(fence) = parse_code_fence(trimmed) {
             code_fence = Some(fence);
-            code_language = language;
             code_lines.clear();
             continue;
         }
@@ -2141,7 +2120,7 @@ fn parse_markdown_lines(markdown: &str) -> Vec<RenderLine> {
     }
 
     if code_fence.is_some() {
-        lines.push(RenderLine::code_block(code_lines.join("\n"), code_language));
+        lines.push(RenderLine::code_block(code_lines.join("\n")));
     }
 
     if markdown.ends_with('\n') {
@@ -2155,7 +2134,7 @@ fn push_code_block_line(code_lines: &mut Vec<String>, line: &str) {
     code_lines.push(line.to_owned());
 }
 
-fn parse_code_fence(line: &str) -> Option<(CodeFence, Option<String>)> {
+fn parse_code_fence(line: &str) -> Option<CodeFence> {
     let fence = if line.starts_with("```") {
         CodeFence::Backtick
     } else if line.starts_with("~~~") {
@@ -2170,14 +2149,7 @@ fn parse_code_fence(line: &str) -> Option<(CodeFence, Option<String>)> {
         return None;
     }
 
-    let language = line[marker_len..]
-        .trim()
-        .split_whitespace()
-        .next()
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-
-    Some((fence, language))
+    Some(fence)
 }
 
 fn is_closing_code_fence(line: &str, fence: CodeFence) -> bool {
@@ -2602,7 +2574,7 @@ fn estimate_code_block_height(text: &str, font_size: f32, available_width: f32, 
             .sum()
     };
 
-    (32.0 + visual_lines * (font_size + 7.0) + 20.0).ceil()
+    (visual_lines * (font_size + 7.0) + 42.0).ceil()
 }
 
 fn total_reader_height(heights: &[f32]) -> f32 {
@@ -2825,7 +2797,6 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].text, "Before");
         assert!(matches!(lines[1].kind, RenderKind::CodeBlock));
-        assert_eq!(lines[1].language.as_deref(), Some("text"));
         assert_eq!(lines[1].text, "alpha\nbeta");
         assert_eq!(lines[2].text, "After");
     }
@@ -2836,7 +2807,6 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert!(matches!(lines[0].kind, RenderKind::CodeBlock));
-        assert_eq!(lines[0].language.as_deref(), Some("json"));
         assert_eq!(lines[0].text, "{\"ok\":true}");
     }
 
