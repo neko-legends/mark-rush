@@ -70,10 +70,34 @@ For local testing:
 Notes for agents:
 
 - Prefer `cargo check` for quick validation and `cargo build --release` before handing off a Windows portable build.
-- The Windows release build uses `build.rs` and `assets/windows/MarkRush.rc` to embed the app icon into the `.exe`.
+- The Windows release build uses `build.rs` to embed the app icon and generated version metadata into the `.exe`.
 - The Windows release binary is configured as a GUI app, so double-clicking `target/release/markrush.exe` should not open a blank console.
 - If resource embedding fails on Windows, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.
 - Do not treat `reference/wpf` as active source. It is kept only to compare behavior with the original Windows version.
+
+## Build Version
+
+Release builds are stamped at compile time with a date plus git hash, similar to Venice Media Local. The status bar shows a friendly label such as:
+
+```text
+ver 2026-05-11 - gabcdef12
+```
+
+The full generated build version is shaped like:
+
+```text
+2026.5.11071530+gabcdef12
+```
+
+Meaning:
+
+- `2026` = UTC build year
+- `5` = UTC build month
+- `11071530` = UTC day + time, here day 11 at 07:15:30
+- `gabcdef12` = git commit hash
+- `.dirty` is appended when the build was made with uncommitted tracked changes
+
+For release binaries, commit first, then run `cargo build --release` so the executable contains the release commit hash rather than the previous commit or a dirty marker.
 
 ## Port Status
 

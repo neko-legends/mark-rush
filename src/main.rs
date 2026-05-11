@@ -738,6 +738,12 @@ impl MarkRushApp {
                         ))
                         .color(theme.muted),
                     );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(env!("MARKRUSH_BUILD_LABEL")).color(theme.muted),
+                        )
+                        .on_hover_text(env!("MARKRUSH_BUILD_VERSION"));
+                    });
                 });
             });
     }
