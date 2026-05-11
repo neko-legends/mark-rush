@@ -17,6 +17,8 @@ The app is written in Rust with egui/eframe and is intended to run on Windows, m
 - Search with `Ctrl+F`, `Enter`, `Shift+Enter`, `F3`, and `Shift+F3`.
 - Follow local file links, folder links, heading anchors, and external URLs.
 - Adjust document font family and font size from the top toolbar.
+- Show the active filename and full path in a dedicated header area.
+- Keep the bottom status bar focused on line and character counts.
 - Persist theme, wrap mode, document font, window size, and rendered scroll position.
 - Start first launch at one-quarter of the current screen area, then remember user resizing.
 - Includes Venice-style themes plus High Contrast.
@@ -77,11 +79,7 @@ If Windows resource embedding fails, install the Visual Studio Build Tools or Wi
 
 ## Versioning
 
-Release builds are stamped at compile time with a date plus git hash. The status bar shows a friendly label such as:
-
-```text
-ver 2026-05-11 - gabcdef12
-```
+Release builds are stamped at compile time with a date plus git hash.
 
 The full build version is shaped like:
 

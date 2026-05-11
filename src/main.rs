@@ -478,7 +478,7 @@ impl MarkRushApp {
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0, theme.panel_alt);
 
-        let topbar_height = 56.0;
+        let topbar_height = 92.0;
         let searchbar_height = 52.0;
         let statusbar_height = 30.0;
         let topbar_rect = egui::Rect::from_min_max(
@@ -551,158 +551,153 @@ impl MarkRushApp {
 
         egui::Frame::new()
             .fill(theme.panel_alt)
-            .inner_margin(egui::Margin::symmetric(12, 10))
+            .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        let file_name = self
-                            .current_file
-                            .as_ref()
-                            .and_then(|path| path.file_name())
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("No file selected");
-                        ui.label(
+                ui.vertical(|ui| {
+                    let file_name = self
+                        .current_file
+                        .as_ref()
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("No file selected");
+                    ui.add_sized(
+                        [ui.available_width(), 20.0],
+                        egui::Label::new(
                             egui::RichText::new(file_name)
                                 .strong()
                                 .size(16.0)
                                 .color(theme.text),
-                        );
+                        )
+                        .truncate(),
+                    );
 
-                        let file_path = self
-                            .current_file
-                            .as_ref()
-                            .map(|path| display_path(path))
-                            .unwrap_or_default();
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(file_path).size(12.0).color(theme.muted),
-                            )
-                            .truncate(),
-                        );
-                    });
+                    let file_path = self
+                        .current_file
+                        .as_ref()
+                        .map(|path| display_path(path))
+                        .unwrap_or_default();
+                    ui.add_sized(
+                        [ui.available_width(), 16.0],
+                        egui::Label::new(
+                            egui::RichText::new(file_path).size(12.0).color(theme.muted),
+                        )
+                        .truncate(),
+                    );
 
+                    ui.add_space(4.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let mut selected_theme = self.theme().name.to_owned();
-                        egui::ComboBox::from_id_salt("theme-picker")
-                            .width(145.0)
-                            .selected_text(selected_theme.clone())
-                            .show_ui(ui, |ui| {
-                                for theme in themes() {
-                                    ui.selectable_value(
-                                        &mut selected_theme,
-                                        theme.name.to_owned(),
-                                        theme.name,
-                                    );
-                                }
-                            });
-
-                        if selected_theme != self.theme().name {
-                            self.theme_index = theme_index_by_name(&selected_theme);
-                            self.settings.theme_name = selected_theme;
-                            self.save_settings();
-                        }
-
-                        let mut selected_font = self.document_font_choice().label.to_owned();
-                        egui::ComboBox::from_id_salt("document-font-picker")
-                            .width(130.0)
-                            .selected_text(selected_font.clone())
-                            .show_ui(ui, |ui| {
-                                for font in document_fonts() {
-                                    ui.selectable_value(
-                                        &mut selected_font,
-                                        font.label.to_owned(),
-                                        font.label,
-                                    );
-                                }
-                            });
-
-                        if selected_font != self.document_font_choice().label {
-                            self.settings.document_font_family = selected_font;
-                            self.save_settings();
-                        }
-
-                        let mut selected_font_size = self.document_font_size();
-                        egui::ComboBox::from_id_salt("document-font-size-picker")
-                            .width(82.0)
-                            .selected_text(format!("{selected_font_size:.0}px"))
-                            .show_ui(ui, |ui| {
-                                for size in FONT_SIZE_OPTIONS {
-                                    ui.selectable_value(
-                                        &mut selected_font_size,
-                                        *size,
-                                        format!("{size:.0}px"),
-                                    );
-                                }
-                            });
-
-                        if (selected_font_size - self.document_font_size()).abs() > f32::EPSILON {
-                            self.settings.document_font_size = selected_font_size;
-                            self.save_settings();
-                        }
-
-                        let can_save =
-                            self.current_file.is_some() && (self.dirty || self.edit_mode);
-                        if ui
-                            .add_enabled(can_save, egui::Button::new("Save").fill(theme.button))
-                            .clicked()
-                        {
-                            self.save_current_file();
-                        }
-
-                        if ui
-                            .add_enabled(
-                                self.current_file.is_some(),
-                                egui::Button::new("Reload").fill(theme.button),
-                            )
-                            .clicked()
-                        {
-                            if let Some(path) = self.current_file.clone() {
-                                self.request_action(PendingAction::OpenFile(path));
-                            }
-                        }
-
-                        let mut wrap = self.settings.word_wrap;
-                        if ui.checkbox(&mut wrap, "Wrap").changed() {
-                            self.settings.word_wrap = wrap;
-                            self.save_settings();
-                        }
-
-                        let mut edit = self.edit_mode;
-                        if ui.checkbox(&mut edit, "Edit").changed() {
-                            self.edit_mode = edit;
-                        }
-
-                        if ui
-                            .add_enabled(
-                                self.current_file.is_some(),
-                                egui::Button::new("Show").fill(theme.button),
-                            )
-                            .clicked()
-                        {
-                            if let Some(path) = &self.current_file {
-                                if let Err(error) = show_in_file_browser(path) {
-                                    self.set_status(format!("Could not show file: {error}"));
-                                } else {
-                                    self.set_status("Opened file in system file browser");
-                                }
-                            }
-                        }
-
-                        if ui
-                            .add_enabled(
-                                self.current_file.is_some(),
-                                egui::Button::new("Copy Path").fill(theme.button),
-                            )
-                            .clicked()
-                        {
-                            if let Some(path) = &self.current_file {
-                                ui.ctx().copy_text(display_path(path));
-                                self.set_status("Copied file path");
-                            }
-                        }
+                        self.draw_topbar_controls(ui, &theme);
                     });
                 });
             });
+    }
+
+    fn draw_topbar_controls(&mut self, ui: &mut egui::Ui, theme: &AppTheme) {
+        let mut selected_theme = self.theme().name.to_owned();
+        egui::ComboBox::from_id_salt("theme-picker")
+            .width(145.0)
+            .selected_text(selected_theme.clone())
+            .show_ui(ui, |ui| {
+                for theme in themes() {
+                    ui.selectable_value(&mut selected_theme, theme.name.to_owned(), theme.name);
+                }
+            });
+
+        if selected_theme != self.theme().name {
+            self.theme_index = theme_index_by_name(&selected_theme);
+            self.settings.theme_name = selected_theme;
+            self.save_settings();
+        }
+
+        let mut selected_font = self.document_font_choice().label.to_owned();
+        egui::ComboBox::from_id_salt("document-font-picker")
+            .width(130.0)
+            .selected_text(selected_font.clone())
+            .show_ui(ui, |ui| {
+                for font in document_fonts() {
+                    ui.selectable_value(&mut selected_font, font.label.to_owned(), font.label);
+                }
+            });
+
+        if selected_font != self.document_font_choice().label {
+            self.settings.document_font_family = selected_font;
+            self.save_settings();
+        }
+
+        let mut selected_font_size = self.document_font_size();
+        egui::ComboBox::from_id_salt("document-font-size-picker")
+            .width(82.0)
+            .selected_text(format!("{selected_font_size:.0}px"))
+            .show_ui(ui, |ui| {
+                for size in FONT_SIZE_OPTIONS {
+                    ui.selectable_value(&mut selected_font_size, *size, format!("{size:.0}px"));
+                }
+            });
+
+        if (selected_font_size - self.document_font_size()).abs() > f32::EPSILON {
+            self.settings.document_font_size = selected_font_size;
+            self.save_settings();
+        }
+
+        let can_save = self.current_file.is_some() && (self.dirty || self.edit_mode);
+        if ui
+            .add_enabled(can_save, egui::Button::new("Save").fill(theme.button))
+            .clicked()
+        {
+            self.save_current_file();
+        }
+
+        if ui
+            .add_enabled(
+                self.current_file.is_some(),
+                egui::Button::new("Reload").fill(theme.button),
+            )
+            .clicked()
+        {
+            if let Some(path) = self.current_file.clone() {
+                self.request_action(PendingAction::OpenFile(path));
+            }
+        }
+
+        let mut wrap = self.settings.word_wrap;
+        if ui.checkbox(&mut wrap, "Wrap").changed() {
+            self.settings.word_wrap = wrap;
+            self.save_settings();
+        }
+
+        let mut edit = self.edit_mode;
+        if ui.checkbox(&mut edit, "Edit").changed() {
+            self.edit_mode = edit;
+        }
+
+        if ui
+            .add_enabled(
+                self.current_file.is_some(),
+                egui::Button::new("Show").fill(theme.button),
+            )
+            .clicked()
+        {
+            if let Some(path) = &self.current_file {
+                if let Err(error) = show_in_file_browser(path) {
+                    self.set_status(format!("Could not show file: {error}"));
+                } else {
+                    self.set_status("Opened file in system file browser");
+                }
+            }
+        }
+
+        if ui
+            .add_enabled(
+                self.current_file.is_some(),
+                egui::Button::new("Copy Path").fill(theme.button),
+            )
+            .clicked()
+        {
+            if let Some(path) = &self.current_file {
+                ui.ctx().copy_text(display_path(path));
+                self.set_status("Copied file path");
+            }
+        }
     }
 
     fn draw_searchbar(&mut self, ui: &mut egui::Ui) {
@@ -763,23 +758,14 @@ impl MarkRushApp {
             .inner_margin(egui::Margin::symmetric(12, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&self.status).color(theme.muted));
-                    ui.separator();
                     ui.label(
                         egui::RichText::new(format!(
-                            "{} lines, {} chars, {}",
+                            "{} lines, {} chars",
                             document_line_count(&self.document_text),
-                            self.document_text.chars().count(),
-                            if self.edit_mode { "source" } else { "rendered" }
+                            self.document_text.chars().count()
                         ))
                         .color(theme.muted),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(env!("MARKRUSH_BUILD_LABEL")).color(theme.muted),
-                        )
-                        .on_hover_text(env!("MARKRUSH_BUILD_VERSION"));
-                    });
                 });
             });
     }
