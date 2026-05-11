@@ -1,50 +1,41 @@
 # MarkRush
 
-MarkRush is a fast local Markdown viewer and editor. The goal is fast file loading and smooth scrolling for Markdown files with thousands of lines, especially in large local folders where slower editors can lag.
+MarkRush is a fast local Markdown viewer and editor for large files and large folders. It is built to open Markdown quickly and keep scrolling smooth even when a document has thousands of lines.
 
-The active implementation is a cross-platform Rust desktop app built with egui/eframe. The original working Windows WPF implementation is preserved in `reference/wpf` only as a behavior reference.
+The app is written in Rust with egui/eframe and is intended to run on Windows, macOS, and Linux.
 
-## Goals
+## Features
 
-- Open local Markdown folders quickly.
-- Read and edit files with thousands of lines without heavy editor lag.
-- Follow local Markdown links and heading anchors.
-- Keep the UI compact, readable, and themeable.
-- Run on Windows, macOS, and Linux from one Rust codebase.
-
-## Current Features
-
-- Open a folder with a native folder picker.
-- Browse Markdown files from a cached, lazily expanded folder tree.
-- Open a folder or file from command-line arguments.
-- Reopen the last folder/file on startup.
+- Open local folders with a native folder picker.
+- Browse Markdown files in a cached, lazily loaded folder tree.
+- Open folders or files from command-line arguments.
+- Reopen the last folder and file on startup.
 - Render large Markdown files as virtualized rows for responsive scrolling.
-- Switch between read mode and raw Markdown edit mode.
+- Switch between rendered read mode and raw Markdown edit mode.
 - Save with the Save button or `Ctrl+S`.
-- Prompt before discarding unsaved changes.
+- Prompt before discarding unsaved edits.
 - Search with `Ctrl+F`, `Enter`, `Shift+Enter`, `F3`, and `Shift+F3`.
-- Follow local file links, local folder links, heading anchors, and external URLs.
-- Adjust rendered/editing font family and document font size from the top toolbar.
+- Follow local file links, folder links, heading anchors, and external URLs.
+- Adjust document font family and font size from the top toolbar.
 - Persist theme, wrap mode, document font, window size, and rendered scroll position.
-- On first launch, start at one-quarter of the current screen area, then remember user resizing.
-- Includes the Venice-style theme set plus High Contrast.
+- Start first launch at one-quarter of the current screen area, then remember user resizing.
+- Includes Venice-style themes plus High Contrast.
 - Bundles redistributable document fonts: Noto Sans, Noto Serif, Lora, Poppins, and Roboto Mono.
 - Writes crash logs to the platform app config directory.
 
+## Download
+
+Windows builds are packaged as portable ZIP files. Unzip the package and run `markrush.exe`; no installer is required.
+
+An installer may be added later if MarkRush needs Start Menu shortcuts, file associations, or auto-update support. For now, the portable build keeps the release simple and transparent.
+
 ## Build From Source
 
-Clone the repo or open it in any directory, then run commands from the repository root.
-
-Example:
+Install Rust from [rustup.rs](https://rustup.rs/), then clone and build:
 
 ```powershell
 git clone https://github.com/flashosophy/MarkRush.git
 cd MarkRush
-```
-
-Install Rust from [rustup.rs](https://rustup.rs/), then use:
-
-```powershell
 cargo build --release
 ```
 
@@ -54,19 +45,7 @@ The release executable is produced under:
 target/release/
 ```
 
-For a portable release package on Windows, use:
-
-```powershell
-.\Build-Windows.ps1
-```
-
-That creates a ZIP under:
-
-```text
-dist/
-```
-
-For local testing:
+For local development:
 
 ```powershell
 cargo run
@@ -78,25 +57,33 @@ On Windows, the direct release executable is:
 .\target\release\markrush.exe
 ```
 
-## Contributor Notes
+## Windows Portable Package
 
-- Prefer `cargo fmt` and `cargo check` for quick validation before committing code changes.
-- Use `cargo build --release` before handing off a direct executable.
-- Prefer `.\Build-Windows.ps1` when preparing a Windows package, because it forces a fresh date/hash build stamp and writes a SHA256 file.
-- The Windows release build uses `build.rs` to embed the app icon and generated version metadata into the `.exe`.
-- The Windows release binary is configured as a GUI app, so double-clicking `target/release/markrush.exe` should not open a blank console.
-- If resource embedding fails on Windows, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.
-- Do not treat `reference/wpf` as active source. It is kept only to compare behavior with the original Windows version.
+To create a Windows portable ZIP with a SHA256 checksum:
 
-## Build Version
+```powershell
+.\Build-Windows.ps1
+```
 
-Release builds are stamped at compile time with a date plus git hash, similar to Venice Media Local. The status bar shows a friendly label such as:
+The package is written to:
+
+```text
+dist/
+```
+
+The Windows release binary embeds the app icon, generated version metadata, and uses the Windows GUI subsystem so double-clicking `markrush.exe` does not open a blank console.
+
+If Windows resource embedding fails, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.
+
+## Versioning
+
+Release builds are stamped at compile time with a date plus git hash. The status bar shows a friendly label such as:
 
 ```text
 ver 2026-05-11 - gabcdef12
 ```
 
-The full generated build version is shaped like:
+The full build version is shaped like:
 
 ```text
 2026.5.11071530+gabcdef12
@@ -106,18 +93,37 @@ Meaning:
 
 - `2026` = UTC build year
 - `5` = UTC build month
-- `11071530` = UTC day + time, here day 11 at 07:15:30
+- `11071530` = UTC day and time, here day 11 at 07:15:30
 - `gabcdef12` = git commit hash
 - `.dirty` is appended when the build was made with uncommitted tracked changes
 
-For release binaries, commit first, then run `cargo build --release` so the executable contains the release commit hash rather than the previous commit or a dirty marker.
+For release binaries, commit first, then build so the executable contains the release commit hash.
 
-## Port Status
+## Development
 
-See [docs/parity-checklist.md](docs/parity-checklist.md).
+Before committing code changes, run:
+
+```powershell
+cargo fmt
+cargo check
+```
+
+Before handing off a release executable, run:
+
+```powershell
+cargo build --release
+```
+
+For Windows release packages, prefer:
+
+```powershell
+.\Build-Windows.ps1
+```
+
+The active app source is the Rust code in `src/`. The `reference/wpf` folder is kept only as an archived behavior reference from the original Windows implementation.
 
 ## License
 
-MIT
+MarkRush is released under the MIT License.
 
 Bundled fonts in `assets/fonts` are distributed under the SIL Open Font License 1.1, with license text included next to each font file.
