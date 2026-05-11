@@ -58,4 +58,5 @@ screenshot*.png
 screenshot*.jpg
 screenshot*.jpeg
 screenshot*.webp
+!screenshot.webp
 screenshots/

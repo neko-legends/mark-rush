@@ -4,6 +4,10 @@ MarkRush is a fast local Markdown viewer and editor for large files and large fo
 
 The app is written in Rust with egui/eframe and is intended to run on Windows, macOS, and Linux.
 
+## Screenshot
+
+![MarkRush screenshot](screenshot.webp)
+
 ## Features
 
 - Open local folders with a native folder picker.
