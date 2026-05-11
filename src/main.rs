@@ -13,6 +13,8 @@ const MAX_STORED_STATUS: usize = 180;
 const READER_ROW_HEIGHT: f32 = 23.0;
 
 fn main() -> eframe::Result {
+    install_panic_hook();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MarkRush")
@@ -49,7 +51,7 @@ impl Default for AppSettings {
     }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct FileViewState {
     reader_line: usize,
 }
@@ -194,6 +196,7 @@ struct MarkRushApp {
     show_save_prompt: bool,
     known_roots: HashSet<PathBuf>,
     pending_scroll_line: Option<usize>,
+    focus_search: bool,
 }
 
 impl MarkRushApp {
@@ -223,6 +226,7 @@ impl MarkRushApp {
             show_save_prompt: false,
             known_roots: HashSet::new(),
             pending_scroll_line: None,
+            focus_search: false,
         };
 
         app.apply_startup_target();
@@ -372,14 +376,17 @@ impl MarkRushApp {
                 self.draw_searchbar(ui);
                 ui.separator();
 
-                let available = ui.available_size();
-                ui.allocate_ui(available, |ui| {
+                let available_width = ui.available_width();
+                let document_height = (ui.available_height() - 28.0).max(0.0);
+                ui.allocate_ui(egui::vec2(available_width, document_height), |ui| {
                     if self.edit_mode {
                         self.draw_editor(ui);
                     } else {
                         self.draw_reader(ui);
                     }
                 });
+                ui.separator();
+                self.draw_statusbar(ui);
             });
     }
 
@@ -511,9 +518,16 @@ impl MarkRushApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    let search_id = ui.make_persistent_id("search-box");
+                    if self.focus_search {
+                        ui.memory_mut(|memory| memory.request_focus(search_id));
+                        self.focus_search = false;
+                    }
+
                     let response = ui.add_enabled(
                         self.current_file.is_some(),
                         egui::TextEdit::singleline(&mut self.search_query)
+                            .id(search_id)
                             .desired_width(280.0)
                             .hint_text("Search"),
                     );
@@ -543,6 +557,27 @@ impl MarkRushApp {
                     }
 
                     ui.label(egui::RichText::new(self.search_status()).color(theme.muted));
+                });
+            });
+    }
+
+    fn draw_statusbar(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme().clone();
+        egui::Frame::new()
+            .fill(theme.panel)
+            .inner_margin(egui::Margin::symmetric(12, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&self.status).color(theme.muted));
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} lines, {} chars",
+                            self.document_text.lines().count(),
+                            self.document_text.chars().count()
+                        ))
+                        .color(theme.muted),
+                    );
                 });
             });
     }
@@ -594,14 +629,15 @@ impl MarkRushApp {
             },
         );
 
-        if let (Some(path), Some(state)) = (
-            self.current_file.clone(),
-            Some(FileViewState {
+        if let Some(path) = self.current_file.clone() {
+            let state = FileViewState {
                 reader_line: (output.state.offset.y / READER_ROW_HEIGHT).floor().max(0.0) as usize,
-            }),
-        ) {
-            self.settings.file_view_states.insert(path, state);
-            self.save_settings();
+            };
+
+            if self.settings.file_view_states.get(&path) != Some(&state) {
+                self.settings.file_view_states.insert(path, state);
+                self.save_settings();
+            }
         }
 
         if let Some(target) = clicked_link {
@@ -704,7 +740,7 @@ impl MarkRushApp {
             }
 
             if input.key_pressed(egui::Key::F) && input.modifiers.command {
-                self.set_status("Search is ready");
+                self.focus_search = true;
             }
 
             if input.key_pressed(egui::Key::F5) {
@@ -1370,6 +1406,33 @@ fn is_visible_dir(path: &Path) -> bool {
 
 fn absolute_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        let log_path = settings_path().and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("MarkRush.crash.log"))
+        });
+
+        let Some(path) = log_path else {
+            return;
+        };
+
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        let message = format!("[{:?}]\n{}\n\n", std::time::SystemTime::now(), panic_info);
+        let _ = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(message.as_bytes())
+            });
+    }));
 }
 
 fn settings_path() -> Option<PathBuf> {
