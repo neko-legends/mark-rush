@@ -24,6 +24,10 @@ const FONT_SIZE_OPTIONS: &[f32] = &[12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22
 const MIN_WINDOW_SIZE: [f32; 2] = [840.0, 520.0];
 const FIRST_LAUNCH_WINDOW_SCREEN_SCALE: f32 = 0.5;
 const UNWRAPPED_DOCUMENT_WIDTH: f32 = 12_000.0;
+const READER_HORIZONTAL_PADDING: f32 = 36.0;
+const READER_MIN_OVERSCAN: f32 = 900.0;
+const READER_OVERSCAN_VIEWPORTS: f32 = 1.5;
+const READER_MAX_OVERSCAN: f32 = 6_000.0;
 
 fn main() -> eframe::Result {
     install_panic_hook();
@@ -790,14 +794,11 @@ impl MarkRushApp {
             .get(self.current_match)
             .map(|search_match| search_match.line_index);
 
-        let current_match_line = current_match_line.or(self.pending_scroll_line);
+        let pending_scroll_line = self.pending_scroll_line.take();
+        let current_match_line = current_match_line.or(pending_scroll_line);
         let font_size = self.document_font_size();
         let font_family = self.document_font_family();
         let row_height = reader_row_height(font_size);
-        let scroll_offset = self
-            .pending_scroll_line
-            .take()
-            .map(|line| line as f32 * row_height);
         let mut clicked_link = None;
 
         let file_scroll_id = egui::Id::new("reader-scroll").with(
@@ -814,33 +815,85 @@ impl MarkRushApp {
         .id_salt(file_scroll_id)
         .content_margin(egui::Margin::symmetric(18, 12))
         .auto_shrink([false, false]);
-        if let Some(offset) = scroll_offset {
-            scroll = scroll.vertical_scroll_offset(offset);
-        }
-
         let wrap = self.settings.word_wrap;
-        let output = scroll.show_rows(ui, row_height, self.render_lines.len(), |ui, row_range| {
-            if !wrap {
-                ui.set_min_width(UNWRAPPED_DOCUMENT_WIDTH);
+        let (output, reader_line) = if wrap {
+            let reader_width = reader_estimate_width(ui.available_width());
+            let estimated_heights =
+                estimate_reader_heights(&self.render_lines, font_size, reader_width);
+            let total_height = total_reader_height(&estimated_heights);
+            if let Some(offset) =
+                pending_scroll_line.map(|line| reader_offset_for_line(&estimated_heights, line))
+            {
+                scroll = scroll.vertical_scroll_offset(offset);
             }
 
-            for index in row_range {
-                if let Some(line) = self.render_lines.get(index) {
-                    let is_match = current_match_line == Some(index);
-                    if let Some(target) =
-                        draw_render_line(ui, line, &theme, is_match, wrap, font_size, &font_family)
-                    {
-                        clicked_link = Some(target);
+            let output = scroll.show_viewport(ui, |ui, viewport| {
+                let overscan = reader_scroll_overscan(viewport.height());
+                let (start, end, top_space, bottom_space) =
+                    reader_virtual_range(&estimated_heights, viewport, overscan, total_height);
+
+                ui.set_min_height(total_height);
+                if top_space > 0.0 {
+                    ui.add_space(top_space);
+                }
+
+                for index in start..end {
+                    if let Some(line) = self.render_lines.get(index) {
+                        let is_match = current_match_line == Some(index);
+                        if let Some(target) = draw_render_line(
+                            ui,
+                            line,
+                            &theme,
+                            is_match,
+                            wrap,
+                            font_size,
+                            &font_family,
+                        ) {
+                            clicked_link = Some(target);
+                        }
                     }
                 }
+
+                if bottom_space > 0.0 {
+                    ui.add_space(bottom_space);
+                }
+            });
+            let reader_line =
+                line_index_at_reader_offset(&estimated_heights, output.state.offset.y);
+            (output, reader_line)
+        } else {
+            if let Some(offset) = pending_scroll_line.map(|line| line as f32 * row_height) {
+                scroll = scroll.vertical_scroll_offset(offset);
             }
-        });
+
+            let output =
+                scroll.show_rows(ui, row_height, self.render_lines.len(), |ui, row_range| {
+                    ui.set_min_width(UNWRAPPED_DOCUMENT_WIDTH);
+
+                    for index in row_range {
+                        if let Some(line) = self.render_lines.get(index) {
+                            let is_match = current_match_line == Some(index);
+                            if let Some(target) = draw_render_line(
+                                ui,
+                                line,
+                                &theme,
+                                is_match,
+                                wrap,
+                                font_size,
+                                &font_family,
+                            ) {
+                                clicked_link = Some(target);
+                            }
+                        }
+                    }
+                });
+            let reader_line = (output.state.offset.y / row_height).floor().max(0.0) as usize;
+            (output, reader_line)
+        };
         self.apply_middle_mouse_scroll(ui, &output, !self.settings.word_wrap, true);
 
         if let Some(path) = self.current_file.clone() {
-            let state = FileViewState {
-                reader_line: (output.state.offset.y / row_height).floor().max(0.0) as usize,
-            };
+            let state = FileViewState { reader_line };
 
             if self.settings.file_view_states.get(&path) != Some(&state) {
                 self.settings.file_view_states.insert(path, state);
@@ -2226,6 +2279,120 @@ fn document_fonts() -> &'static [DocumentFontChoice] {
 
 fn reader_row_height(font_size: f32) -> f32 {
     (font_size + 10.0).ceil()
+}
+
+fn reader_estimate_width(available_width: f32) -> f32 {
+    (available_width - READER_HORIZONTAL_PADDING).max(180.0)
+}
+
+fn estimate_reader_heights(lines: &[RenderLine], font_size: f32, available_width: f32) -> Vec<f32> {
+    lines
+        .iter()
+        .map(|line| estimate_reader_line_height(line, font_size, available_width))
+        .collect()
+}
+
+fn estimate_reader_line_height(line: &RenderLine, font_size: f32, available_width: f32) -> f32 {
+    let row_height = reader_row_height(font_size);
+
+    match line.kind {
+        RenderKind::Blank => (row_height * 0.65).ceil().max(10.0),
+        RenderKind::Rule => row_height,
+        RenderKind::Heading(level) => {
+            let heading_size = match level {
+                1 => font_size + 7.0,
+                2 => font_size + 4.0,
+                3 => font_size + 2.0,
+                _ => font_size + 0.5,
+            };
+            estimate_wrapped_text_height(&line.text, heading_size, available_width, 4.0)
+                .max(reader_row_height(heading_size))
+        }
+        RenderKind::Quote => {
+            estimate_wrapped_text_height(&line.text, font_size, available_width - 28.0, 6.0)
+        }
+        RenderKind::Code => {
+            estimate_wrapped_text_height(&line.text, font_size, available_width - 12.0, 8.0)
+                .max(row_height)
+        }
+        RenderKind::List | RenderKind::Paragraph | RenderKind::Table => {
+            estimate_wrapped_text_height(&line.text, font_size, available_width, 6.0)
+                .max(row_height)
+        }
+    }
+}
+
+fn estimate_wrapped_text_height(
+    text: &str,
+    font_size: f32,
+    available_width: f32,
+    vertical_padding: f32,
+) -> f32 {
+    let average_char_width = (font_size * 0.58).max(7.0);
+    let chars_per_visual_line = (available_width.max(120.0) / average_char_width)
+        .floor()
+        .max(8.0);
+    let character_count = text.chars().count().max(1) as f32;
+    let visual_lines = (character_count / chars_per_visual_line).ceil().max(1.0);
+
+    (visual_lines * (font_size + 7.0) + vertical_padding).ceil()
+}
+
+fn total_reader_height(heights: &[f32]) -> f32 {
+    heights.iter().sum()
+}
+
+fn reader_offset_for_line(heights: &[f32], line_index: usize) -> f32 {
+    heights.iter().take(line_index).sum()
+}
+
+fn line_index_at_reader_offset(heights: &[f32], offset: f32) -> usize {
+    let mut y = 0.0;
+
+    for (index, height) in heights.iter().enumerate() {
+        if y + *height > offset {
+            return index;
+        }
+
+        y += *height;
+    }
+
+    heights.len().saturating_sub(1)
+}
+
+fn reader_scroll_overscan(viewport_height: f32) -> f32 {
+    (viewport_height * READER_OVERSCAN_VIEWPORTS)
+        .max(READER_MIN_OVERSCAN)
+        .min(READER_MAX_OVERSCAN)
+}
+
+fn reader_virtual_range(
+    heights: &[f32],
+    viewport: egui::Rect,
+    overscan: f32,
+    total_height: f32,
+) -> (usize, usize, f32, f32) {
+    let start_target = (viewport.min.y - overscan).max(0.0);
+    let end_target = (viewport.max.y + overscan)
+        .min(total_height)
+        .max(start_target);
+    let mut start = 0;
+    let mut start_offset = 0.0;
+
+    while start < heights.len() && start_offset + heights[start] < start_target {
+        start_offset += heights[start];
+        start += 1;
+    }
+
+    let mut end = start;
+    let mut end_offset = start_offset;
+    while end < heights.len() && end_offset < end_target {
+        end_offset += heights[end];
+        end += 1;
+    }
+
+    let bottom_space = (total_height - end_offset).max(0.0);
+    (start, end, start_offset, bottom_space)
 }
 
 fn document_line_count(text: &str) -> usize {
