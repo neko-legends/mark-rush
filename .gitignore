@@ -15,6 +15,9 @@ TestResults/
 *.suo
 *.rsuser
 
+# Rust build outputs
+target/
+
 # Logs and local runtime state
 *.log
 *.crash.log
