@@ -920,7 +920,6 @@ impl MarkRushApp {
                 let (start, end, top_space, bottom_space) =
                     reader_virtual_range(&estimated_heights, viewport, overscan, total_height);
 
-                ui.set_min_height(total_height);
                 if top_space > 0.0 {
                     ui.add_space(top_space);
                 }
