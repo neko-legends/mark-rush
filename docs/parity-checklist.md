@@ -70,9 +70,11 @@ Legend: `[x]` implemented in the Rust app, `[~]` partially implemented, `[ ]` st
 - [x] High Contrast theme.
 - [x] Persist selected theme.
 - [x] Persist line wrapping.
+- [x] Persist document font family and document font size.
 - [x] Persist window size.
 - [x] Keep controls readable across themes.
 - [x] Rounded theme dropdown and compact tool controls.
+- [x] Bundle redistributable document fonts for cross-platform consistency.
 - [x] Match WPF reference font scale, document padding, editor padding, and status/title text behavior.
 
 ## Reliability

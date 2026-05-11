@@ -13,6 +13,7 @@ const MAX_STORED_STATUS: usize = 180;
 const MAX_STORED_FILE_VIEW_STATES: usize = 250;
 const MIDDLE_SCROLL_DEAD_ZONE: f32 = 8.0;
 const MIDDLE_SCROLL_MAX_SPEED: f32 = 80.0;
+const DEFAULT_DOCUMENT_FONT_FAMILY: &str = "System UI";
 const DEFAULT_DOCUMENT_FONT_SIZE: f32 = 15.0;
 const FONT_SIZE_OPTIONS: &[f32] = &[12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0];
 const UNWRAPPED_DOCUMENT_WIDTH: f32 = 12_000.0;
@@ -47,6 +48,7 @@ struct AppSettings {
     last_file_path: Option<PathBuf>,
     theme_name: String,
     word_wrap: bool,
+    document_font_family: String,
     document_font_size: f32,
     window_width: Option<f32>,
     window_height: Option<f32>,
@@ -60,6 +62,7 @@ impl Default for AppSettings {
             last_file_path: None,
             theme_name: "EVA Dark".to_owned(),
             word_wrap: true,
+            document_font_family: DEFAULT_DOCUMENT_FONT_FAMILY.to_owned(),
             document_font_size: DEFAULT_DOCUMENT_FONT_SIZE,
             window_width: None,
             window_height: None,
@@ -91,6 +94,11 @@ struct AppTheme {
     search_highlight: egui::Color32,
     search_highlight_text: egui::Color32,
     code: egui::Color32,
+}
+
+struct DocumentFontChoice {
+    label: &'static str,
+    font_key: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -547,6 +555,25 @@ impl MarkRushApp {
                             self.save_settings();
                         }
 
+                        let mut selected_font = self.document_font_choice().label.to_owned();
+                        egui::ComboBox::from_id_salt("document-font-picker")
+                            .width(130.0)
+                            .selected_text(selected_font.clone())
+                            .show_ui(ui, |ui| {
+                                for font in document_fonts() {
+                                    ui.selectable_value(
+                                        &mut selected_font,
+                                        font.label.to_owned(),
+                                        font.label,
+                                    );
+                                }
+                            });
+
+                        if selected_font != self.document_font_choice().label {
+                            self.settings.document_font_family = selected_font;
+                            self.save_settings();
+                        }
+
                         let mut selected_font_size = self.document_font_size();
                         egui::ComboBox::from_id_salt("document-font-size-picker")
                             .width(82.0)
@@ -725,6 +752,7 @@ impl MarkRushApp {
 
         let current_match_line = current_match_line.or(self.pending_scroll_line);
         let font_size = self.document_font_size();
+        let font_family = self.document_font_family();
         let row_height = reader_row_height(font_size);
         let scroll_offset = self
             .pending_scroll_line
@@ -760,7 +788,7 @@ impl MarkRushApp {
                 if let Some(line) = self.render_lines.get(index) {
                     let is_match = current_match_line == Some(index);
                     if let Some(target) =
-                        draw_render_line(ui, line, &theme, is_match, wrap, font_size)
+                        draw_render_line(ui, line, &theme, is_match, wrap, font_size, &font_family)
                     {
                         clicked_link = Some(target);
                     }
@@ -802,6 +830,7 @@ impl MarkRushApp {
             UNWRAPPED_DOCUMENT_WIDTH
         };
         let font_size = self.document_font_size();
+        let font_family = self.document_editor_font_family();
 
         let edit = egui::TextEdit::multiline(&mut self.document_text)
             .id(egui::Id::new("editor").with(
@@ -811,7 +840,7 @@ impl MarkRushApp {
                     .unwrap_or_default(),
             ))
             .desired_width(desired_width)
-            .font(egui::FontId::new(font_size, egui::FontFamily::Monospace))
+            .font(egui::FontId::new(font_size, font_family))
             .text_color(theme.text)
             .code_editor()
             .lock_focus(true);
@@ -1206,6 +1235,24 @@ impl MarkRushApp {
         sanitize_document_font_size(self.settings.document_font_size)
     }
 
+    fn document_font_choice(&self) -> &'static DocumentFontChoice {
+        document_font_by_label(&self.settings.document_font_family)
+    }
+
+    fn document_font_family(&self) -> egui::FontFamily {
+        match self.document_font_choice().font_key {
+            Some(font_key) => egui::FontFamily::Name(font_key.into()),
+            None => egui::FontFamily::Proportional,
+        }
+    }
+
+    fn document_editor_font_family(&self) -> egui::FontFamily {
+        match self.document_font_choice().font_key {
+            Some(font_key) => egui::FontFamily::Name(font_key.into()),
+            None => egui::FontFamily::Monospace,
+        }
+    }
+
     fn update_window_title(&self, ctx: &egui::Context) {
         let marker = if self.dirty { "*" } else { "" };
         let file_name = self
@@ -1519,6 +1566,7 @@ fn draw_render_line(
     is_match: bool,
     wrap: bool,
     font_size: f32,
+    font_family: &egui::FontFamily,
 ) -> Option<String> {
     let mut clicked_link = None;
     let fill = if is_match {
@@ -1548,15 +1596,26 @@ fn draw_render_line(
                 ui.label(
                     egui::RichText::new(&line.text)
                         .strong()
-                        .size(size)
+                        .font(egui::FontId::new(size, font_family.clone()))
                         .color(text_color),
                 );
             }
             RenderKind::Quote => {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("|").size(font_size).color(theme.accent));
-                    clicked_link =
-                        draw_inline_segments(ui, &line.text, theme, theme.muted, wrap, font_size);
+                    ui.label(
+                        egui::RichText::new("|")
+                            .font(egui::FontId::new(font_size, font_family.clone()))
+                            .color(theme.accent),
+                    );
+                    clicked_link = draw_inline_segments(
+                        ui,
+                        &line.text,
+                        theme,
+                        theme.muted,
+                        wrap,
+                        font_size,
+                        font_family,
+                    );
                 });
             }
             RenderKind::Code => {
@@ -1566,7 +1625,7 @@ fn draw_render_line(
                     .show(ui, |ui| {
                         ui.monospace(
                             egui::RichText::new(&line.text)
-                                .size(font_size)
+                                .font(egui::FontId::new(font_size, font_family.clone()))
                                 .color(text_color),
                         );
                     });
@@ -1575,8 +1634,15 @@ fn draw_render_line(
                 ui.separator();
             }
             RenderKind::List | RenderKind::Table | RenderKind::Paragraph => {
-                clicked_link =
-                    draw_inline_segments(ui, &line.text, theme, text_color, wrap, font_size);
+                clicked_link = draw_inline_segments(
+                    ui,
+                    &line.text,
+                    theme,
+                    text_color,
+                    wrap,
+                    font_size,
+                    font_family,
+                );
             }
         }
     });
@@ -1595,6 +1661,7 @@ fn draw_inline_segments(
     text_color: egui::Color32,
     wrap: bool,
     font_size: f32,
+    font_family: &egui::FontFamily,
 ) -> Option<String> {
     let mut clicked_link = None;
 
@@ -1602,12 +1669,12 @@ fn draw_inline_segments(
         let mut remaining = text;
         while let Some((before, label, target, after)) = next_markdown_link(remaining) {
             if !before.is_empty() {
-                draw_plain_inline(ui, before, theme, text_color, font_size);
+                draw_plain_inline(ui, before, theme, text_color, font_size, font_family);
             }
 
             let response = ui.link(
                 egui::RichText::new(label)
-                    .size(font_size)
+                    .font(egui::FontId::new(font_size, font_family.clone()))
                     .color(theme.accent_2),
             );
             if response.clicked() {
@@ -1618,7 +1685,7 @@ fn draw_inline_segments(
         }
 
         if !remaining.is_empty() {
-            draw_plain_inline(ui, remaining, theme, text_color, font_size);
+            draw_plain_inline(ui, remaining, theme, text_color, font_size, font_family);
         }
     };
 
@@ -1637,6 +1704,7 @@ fn draw_plain_inline(
     theme: &AppTheme,
     text_color: egui::Color32,
     font_size: f32,
+    font_family: &egui::FontFamily,
 ) {
     let mut remaining = text;
 
@@ -1659,7 +1727,7 @@ fn draw_plain_inline(
         let Some((index, marker)) = marker else {
             ui.label(
                 egui::RichText::new(remaining)
-                    .size(font_size)
+                    .font(egui::FontId::new(font_size, font_family.clone()))
                     .color(text_color),
             );
             break;
@@ -1668,7 +1736,7 @@ fn draw_plain_inline(
         if index > 0 {
             ui.label(
                 egui::RichText::new(&remaining[..index])
-                    .size(font_size)
+                    .font(egui::FontId::new(font_size, font_family.clone()))
                     .color(text_color),
             );
         }
@@ -1677,7 +1745,7 @@ fn draw_plain_inline(
         let Some(end) = after_marker.find(marker) else {
             ui.label(
                 egui::RichText::new(&remaining[index..])
-                    .size(font_size)
+                    .font(egui::FontId::new(font_size, font_family.clone()))
                     .color(text_color),
             );
             break;
@@ -1689,7 +1757,7 @@ fn draw_plain_inline(
                 ui.label(
                     egui::RichText::new(inner)
                         .strong()
-                        .size(font_size)
+                        .font(egui::FontId::new(font_size, font_family.clone()))
                         .color(text_color),
                 );
             }
@@ -1700,7 +1768,7 @@ fn draw_plain_inline(
                     .show(ui, |ui| {
                         ui.monospace(
                             egui::RichText::new(inner)
-                                .size(font_size)
+                                .font(egui::FontId::new(font_size, font_family.clone()))
                                 .color(theme.accent),
                         );
                     });
@@ -1709,7 +1777,7 @@ fn draw_plain_inline(
                 ui.label(
                     egui::RichText::new(inner)
                         .italics()
-                        .size(font_size)
+                        .font(egui::FontId::new(font_size, font_family.clone()))
                         .color(text_color),
                 );
             }
@@ -1998,6 +2066,43 @@ fn sanitize_document_font_size(size: f32) -> f32 {
     }
 }
 
+fn document_font_by_label(label: &str) -> &'static DocumentFontChoice {
+    document_fonts()
+        .iter()
+        .find(|font| font.label.eq_ignore_ascii_case(label))
+        .unwrap_or(&document_fonts()[0])
+}
+
+fn document_fonts() -> &'static [DocumentFontChoice] {
+    static FONTS: &[DocumentFontChoice] = &[
+        DocumentFontChoice {
+            label: "System UI",
+            font_key: None,
+        },
+        DocumentFontChoice {
+            label: "Noto Sans",
+            font_key: Some("markrush-noto-sans"),
+        },
+        DocumentFontChoice {
+            label: "Noto Serif",
+            font_key: Some("markrush-noto-serif"),
+        },
+        DocumentFontChoice {
+            label: "Lora",
+            font_key: Some("markrush-lora"),
+        },
+        DocumentFontChoice {
+            label: "Poppins",
+            font_key: Some("markrush-poppins"),
+        },
+        DocumentFontChoice {
+            label: "Roboto Mono",
+            font_key: Some("markrush-roboto-mono"),
+        },
+    ];
+    FONTS
+}
+
 fn reader_row_height(font_size: f32) -> f32 {
     (font_size + 10.0).ceil()
 }
@@ -2047,7 +2152,68 @@ fn install_system_fonts(ctx: &egui::Context) {
         }
     }
 
+    let proportional_fallbacks = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let monospace_fallbacks = fonts
+        .families
+        .get(&egui::FontFamily::Monospace)
+        .cloned()
+        .unwrap_or_default();
+
+    register_embedded_font(
+        &mut fonts,
+        "markrush-noto-sans",
+        include_bytes!("../assets/fonts/NotoSans.ttf"),
+        &proportional_fallbacks,
+    );
+    register_embedded_font(
+        &mut fonts,
+        "markrush-noto-serif",
+        include_bytes!("../assets/fonts/NotoSerif.ttf"),
+        &proportional_fallbacks,
+    );
+    register_embedded_font(
+        &mut fonts,
+        "markrush-lora",
+        include_bytes!("../assets/fonts/Lora.ttf"),
+        &proportional_fallbacks,
+    );
+    register_embedded_font(
+        &mut fonts,
+        "markrush-poppins",
+        include_bytes!("../assets/fonts/Poppins.ttf"),
+        &proportional_fallbacks,
+    );
+    register_embedded_font(
+        &mut fonts,
+        "markrush-roboto-mono",
+        include_bytes!("../assets/fonts/RobotoMono.ttf"),
+        &monospace_fallbacks,
+    );
+
     ctx.set_fonts(fonts);
+}
+
+fn register_embedded_font(
+    fonts: &mut egui::FontDefinitions,
+    font_key: &'static str,
+    bytes: &'static [u8],
+    fallback_fonts: &[String],
+) {
+    fonts.font_data.insert(
+        font_key.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(bytes)),
+    );
+
+    let mut family_fonts = Vec::with_capacity(fallback_fonts.len() + 1);
+    family_fonts.push(font_key.to_owned());
+    family_fonts.extend(fallback_fonts.iter().cloned());
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(font_key.into()), family_fonts);
 }
 
 fn install_panic_hook() {

@@ -24,8 +24,10 @@ The active implementation is a cross-platform Rust desktop app built with egui/e
 - Prompt before discarding unsaved changes.
 - Search with `Ctrl+F`, `Enter`, `Shift+Enter`, `F3`, and `Shift+F3`.
 - Follow local file links, local folder links, heading anchors, and external URLs.
-- Persist theme, wrap mode, window size, and rendered scroll position.
+- Adjust rendered/editing font family and document font size from the top toolbar.
+- Persist theme, wrap mode, document font, window size, and rendered scroll position.
 - Includes the Venice-style theme set plus High Contrast.
+- Bundles redistributable document fonts: Noto Sans, Noto Serif, Lora, Poppins, and Roboto Mono.
 - Writes crash logs to the platform app config directory.
 
 ## Build
@@ -49,3 +51,5 @@ See [docs/parity-checklist.md](docs/parity-checklist.md).
 ## License
 
 MIT
+
+Bundled fonts in `assets/fonts` are distributed under the SIL Open Font License 1.1, with license text included next to each font file.
