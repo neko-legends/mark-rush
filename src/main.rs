@@ -24,6 +24,16 @@ const FONT_SIZE_OPTIONS: &[f32] = &[12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22
 const MIN_WINDOW_SIZE: [f32; 2] = [840.0, 520.0];
 const FIRST_LAUNCH_WINDOW_SCREEN_SCALE: f32 = 0.5;
 const UNWRAPPED_DOCUMENT_WIDTH: f32 = 12_000.0;
+const TOPBAR_PATH_COPY_WIDTH: f32 = 30.0;
+const TOPBAR_LEFT_CONTROLS_WIDTH: f32 = 116.0;
+const TOPBAR_TOOLBAR_HEIGHT: f32 = 34.0;
+const TOPBAR_ICON_BUTTON_SIZE: f32 = 32.0;
+const TOPBAR_MIN_FONT_SIZE_WIDTH: f32 = 64.0;
+const TOPBAR_MIN_FONT_WIDTH: f32 = 96.0;
+const TOPBAR_MIN_THEME_WIDTH: f32 = 92.0;
+const TOPBAR_FONT_SIZE_WIDTH: f32 = 82.0;
+const TOPBAR_FONT_WIDTH: f32 = 130.0;
+const TOPBAR_THEME_WIDTH: f32 = 145.0;
 const READER_HORIZONTAL_PADDING: f32 = 36.0;
 const READER_MIN_OVERSCAN: f32 = 900.0;
 const READER_OVERSCAN_VIEWPORTS: f32 = 1.5;
@@ -109,6 +119,13 @@ impl Default for AppSettings {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct FileViewState {
     reader_line: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TopbarControlWidths {
+    theme: f32,
+    font: f32,
+    font_size: f32,
 }
 
 #[derive(Clone)]
@@ -578,13 +595,18 @@ impl MarkRushApp {
                     );
 
                     ui.horizontal(|ui| {
+                        let row_width = ui.available_width();
+                        let spacing = ui.spacing().item_spacing.x;
                         let file_path = self
                             .current_file
                             .as_ref()
                             .map(|path| display_path(path))
                             .unwrap_or_default();
                         ui.add_sized(
-                            [ui.available_width(), 18.0],
+                            [
+                                (row_width - TOPBAR_PATH_COPY_WIDTH - spacing).max(0.0),
+                                18.0,
+                            ],
                             egui::Label::new(
                                 egui::RichText::new(file_path).size(12.0).color(theme.muted),
                             )
@@ -596,7 +618,7 @@ impl MarkRushApp {
                                 self.current_file.is_some(),
                                 egui::Button::new(egui::RichText::new("📋").size(13.0))
                                     .fill(theme.button)
-                                    .min_size(egui::vec2(26.0, 22.0)),
+                                    .min_size(egui::vec2(TOPBAR_PATH_COPY_WIDTH, 22.0)),
                             )
                             .on_hover_text("Copy path");
                         if copy_response.clicked() {
@@ -609,29 +631,51 @@ impl MarkRushApp {
 
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        let mut edit = self.edit_mode;
-                        if ui.checkbox(&mut edit, "Edit").changed() {
-                            self.edit_mode = edit;
-                        }
+                        let row_width = ui.available_width();
+                        let spacing = ui.spacing().item_spacing.x;
+                        let left_width = topbar_left_controls_width(row_width);
+                        let controls_width = (row_width - left_width - spacing).max(0.0);
+                        let control_widths =
+                            topbar_control_widths(controls_width, ui.spacing().item_spacing.x);
 
-                        let mut wrap = self.settings.word_wrap;
-                        if ui.checkbox(&mut wrap, "Wrap").changed() {
-                            self.settings.word_wrap = wrap;
-                            self.save_settings();
-                        }
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(left_width, TOPBAR_TOOLBAR_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let mut edit = self.edit_mode;
+                                if ui.checkbox(&mut edit, "Edit").changed() {
+                                    self.edit_mode = edit;
+                                }
 
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            self.draw_topbar_controls(ui, &theme);
-                        });
+                                let mut wrap = self.settings.word_wrap;
+                                if ui.checkbox(&mut wrap, "Wrap").changed() {
+                                    self.settings.word_wrap = wrap;
+                                    self.save_settings();
+                                }
+                            },
+                        );
+
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(controls_width, TOPBAR_TOOLBAR_HEIGHT),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                self.draw_topbar_controls(ui, &theme, control_widths);
+                            },
+                        );
                     });
                 });
             });
     }
 
-    fn draw_topbar_controls(&mut self, ui: &mut egui::Ui, theme: &AppTheme) {
+    fn draw_topbar_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &AppTheme,
+        widths: TopbarControlWidths,
+    ) {
         let mut selected_theme = self.theme().name.to_owned();
         egui::ComboBox::from_id_salt("theme-picker")
-            .width(145.0)
+            .width(widths.theme)
             .selected_text(selected_theme.clone())
             .show_ui(ui, |ui| {
                 for theme in themes() {
@@ -647,7 +691,7 @@ impl MarkRushApp {
 
         let mut selected_font = self.document_font_choice().label.to_owned();
         egui::ComboBox::from_id_salt("document-font-picker")
-            .width(130.0)
+            .width(widths.font)
             .selected_text(selected_font.clone())
             .show_ui(ui, |ui| {
                 for font in document_fonts() {
@@ -662,7 +706,7 @@ impl MarkRushApp {
 
         let mut selected_font_size = self.document_font_size();
         egui::ComboBox::from_id_salt("document-font-size-picker")
-            .width(82.0)
+            .width(widths.font_size)
             .selected_text(format!("{selected_font_size:.0}px"))
             .show_ui(ui, |ui| {
                 for size in FONT_SIZE_OPTIONS {
@@ -1823,7 +1867,7 @@ fn toolbar_icon_button(
         enabled,
         egui::Button::new(egui::RichText::new(icon).size(15.0))
             .fill(theme.button)
-            .min_size(egui::vec2(34.0, 34.0)),
+            .min_size(egui::vec2(TOPBAR_ICON_BUTTON_SIZE, TOPBAR_ICON_BUTTON_SIZE)),
     )
     .on_hover_text(tooltip)
 }
@@ -2279,6 +2323,37 @@ fn document_fonts() -> &'static [DocumentFontChoice] {
 
 fn reader_row_height(font_size: f32) -> f32 {
     (font_size + 10.0).ceil()
+}
+
+fn topbar_left_controls_width(row_width: f32) -> f32 {
+    if row_width <= TOPBAR_LEFT_CONTROLS_WIDTH {
+        row_width
+    } else {
+        TOPBAR_LEFT_CONTROLS_WIDTH.min((row_width * 0.35).max(96.0))
+    }
+}
+
+fn topbar_control_widths(available_width: f32, item_spacing: f32) -> TopbarControlWidths {
+    let icon_width = TOPBAR_ICON_BUTTON_SIZE * 3.0;
+    let fixed_spacing = item_spacing * 5.0;
+    let combo_budget = (available_width - icon_width - fixed_spacing).max(0.0);
+    let minimum_combo_width =
+        TOPBAR_MIN_FONT_SIZE_WIDTH + TOPBAR_MIN_FONT_WIDTH + TOPBAR_MIN_THEME_WIDTH;
+    let mut extra = (combo_budget - minimum_combo_width).max(0.0);
+
+    let font_size_extra = extra.min(TOPBAR_FONT_SIZE_WIDTH - TOPBAR_MIN_FONT_SIZE_WIDTH);
+    extra -= font_size_extra;
+
+    let font_extra = extra.min(TOPBAR_FONT_WIDTH - TOPBAR_MIN_FONT_WIDTH);
+    extra -= font_extra;
+
+    let theme_extra = extra.min(TOPBAR_THEME_WIDTH - TOPBAR_MIN_THEME_WIDTH);
+
+    TopbarControlWidths {
+        theme: TOPBAR_MIN_THEME_WIDTH + theme_extra,
+        font: TOPBAR_MIN_FONT_WIDTH + font_extra,
+        font_size: TOPBAR_MIN_FONT_SIZE_WIDTH + font_size_extra,
+    }
 }
 
 fn reader_estimate_width(available_width: f32) -> f32 {
