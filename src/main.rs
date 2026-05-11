@@ -479,39 +479,39 @@ impl MarkRushApp {
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0, theme.panel_alt);
 
-        let topbar_height = 92.0;
-        let searchbar_height = 52.0;
+        let chrome_gap = 8.0;
+        let topbar_height = 104.0;
+        let searchbar_height = 50.0;
         let statusbar_height = 30.0;
         let topbar_rect = egui::Rect::from_min_max(
             rect.min,
             egui::pos2(rect.max.x, (rect.min.y + topbar_height).min(rect.max.y)),
         );
         let searchbar_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.min.x, topbar_rect.max.y),
+            egui::pos2(rect.min.x, (topbar_rect.max.y + chrome_gap).min(rect.max.y)),
             egui::pos2(
                 rect.max.x,
-                (topbar_rect.max.y + searchbar_height).min(rect.max.y),
+                (topbar_rect.max.y + chrome_gap + searchbar_height).min(rect.max.y),
             ),
         );
         let statusbar_rect = egui::Rect::from_min_max(
             egui::pos2(rect.min.x, (rect.max.y - statusbar_height).max(rect.min.y)),
             rect.max,
         );
+        let document_min_y = (searchbar_rect.max.y + chrome_gap).min(statusbar_rect.min.y);
         let document_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.min.x, searchbar_rect.max.y),
-            egui::pos2(rect.max.x, statusbar_rect.min.y.max(searchbar_rect.max.y)),
+            egui::pos2(rect.min.x, document_min_y),
+            egui::pos2(rect.max.x, statusbar_rect.min.y.max(document_min_y)),
         );
 
-        for y in [
-            topbar_rect.max.y,
-            searchbar_rect.max.y,
-            statusbar_rect.min.y,
-        ] {
-            ui.painter().line_segment(
-                [egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)],
-                egui::Stroke::new(1.0, theme.border),
-            );
-        }
+        ui.painter().rect_filled(document_rect, 0, theme.window);
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.min.x, statusbar_rect.min.y),
+                egui::pos2(rect.max.x, statusbar_rect.min.y),
+            ],
+            egui::Stroke::new(1.0, theme.border),
+        );
 
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -554,6 +554,7 @@ impl MarkRushApp {
             .fill(theme.panel_alt)
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
                 ui.vertical(|ui| {
                     let file_name = self
                         .current_file
@@ -706,7 +707,7 @@ impl MarkRushApp {
 
         egui::Frame::new()
             .fill(theme.panel_alt)
-            .inner_margin(egui::Margin::symmetric(12, 8))
+            .inner_margin(egui::Margin::symmetric(16, 8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let search_id = ui.make_persistent_id("search-box");
