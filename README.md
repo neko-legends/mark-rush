@@ -61,6 +61,18 @@ The portable Windows executable is produced at:
 target/release/markrush.exe
 ```
 
+For a portable release package on Windows, use:
+
+```powershell
+.\Build-Windows.ps1
+```
+
+That creates a ZIP under:
+
+```text
+dist/
+```
+
 For local testing:
 
 ```powershell
@@ -70,6 +82,7 @@ For local testing:
 Notes for agents:
 
 - Prefer `cargo check` for quick validation and `cargo build --release` before handing off a Windows portable build.
+- Prefer `.\Build-Windows.ps1` when preparing a Windows package, because it forces a fresh date/hash build stamp and writes a SHA256 file.
 - The Windows release build uses `build.rs` to embed the app icon and generated version metadata into the `.exe`.
 - The Windows release binary is configured as a GUI app, so double-clicking `target/release/markrush.exe` should not open a blank console.
 - If resource embedding fails on Windows, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.

@@ -42,6 +42,7 @@ fn main() {
 
 fn watch_build_inputs() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=MARKRUSH_BUILD_STAMP");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=README.md");
     println!("cargo:rerun-if-changed=src");
@@ -110,6 +111,12 @@ fn git_info() -> GitInfo {
 }
 
 fn current_build_time() -> BuildTime {
+    if let Ok(stamp) = env::var("MARKRUSH_BUILD_STAMP")
+        && let Some(time) = parse_build_stamp(&stamp)
+    {
+        return time;
+    }
+
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -126,6 +133,21 @@ fn current_build_time() -> BuildTime {
         minute: (seconds_of_day % 3_600) / 60,
         second: seconds_of_day % 60,
     }
+}
+
+fn parse_build_stamp(stamp: &str) -> Option<BuildTime> {
+    if stamp.len() != 14 || !stamp.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(BuildTime {
+        year: stamp[0..4].parse().ok()?,
+        month: stamp[4..6].parse().ok()?,
+        day: stamp[6..8].parse().ok()?,
+        hour: stamp[8..10].parse().ok()?,
+        minute: stamp[10..12].parse().ok()?,
+        second: stamp[12..14].parse().ok()?,
+    })
 }
 
 fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
