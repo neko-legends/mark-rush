@@ -186,6 +186,12 @@ enum PendingAction {
     ClearFile,
 }
 
+#[derive(Clone, Copy)]
+struct MiddleDragScroll {
+    scroll_id: egui::Id,
+    last_pos: egui::Pos2,
+}
+
 struct MarkRushApp {
     settings: AppSettings,
     settings_path: Option<PathBuf>,
@@ -206,6 +212,7 @@ struct MarkRushApp {
     known_roots: HashSet<PathBuf>,
     pending_scroll_line: Option<usize>,
     focus_search: bool,
+    middle_drag_scroll: Option<MiddleDragScroll>,
 }
 
 impl MarkRushApp {
@@ -236,6 +243,7 @@ impl MarkRushApp {
             known_roots: HashSet::new(),
             pending_scroll_line: None,
             focus_search: false,
+            middle_drag_scroll: None,
         };
 
         app.apply_startup_target();
@@ -372,7 +380,7 @@ impl MarkRushApp {
 
                     ui.add_space(8.0);
 
-                    egui::ScrollArea::vertical()
+                    let tree_output = egui::ScrollArea::vertical()
                         .id_salt("sidebar-tree-scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -389,6 +397,7 @@ impl MarkRushApp {
                                 );
                             }
                         });
+                    self.apply_middle_mouse_scroll(ui, &tree_output, false, true);
                 });
             },
         );
@@ -713,6 +722,7 @@ impl MarkRushApp {
                 }
             },
         );
+        self.apply_middle_mouse_scroll(ui, &output, false, true);
 
         if let Some(path) = self.current_file.clone() {
             let state = FileViewState {
@@ -763,19 +773,21 @@ impl MarkRushApp {
         );
 
         let response = if self.settings.word_wrap {
-            egui::ScrollArea::vertical()
+            let output = egui::ScrollArea::vertical()
                 .id_salt(editor_scroll_id.with("wrap"))
                 .auto_shrink([false, false])
-                .show(ui, |ui| ui.add_sized(ui.available_size(), edit))
-                .inner
+                .show(ui, |ui| ui.add_sized(ui.available_size(), edit));
+            self.apply_middle_mouse_scroll(ui, &output, false, true);
+            output.inner
         } else {
-            egui::ScrollArea::both()
+            let output = egui::ScrollArea::both()
                 .id_salt(editor_scroll_id.with("both"))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.add_sized(egui::vec2(desired_width, ui.available_height()), edit)
-                })
-                .inner
+                });
+            self.apply_middle_mouse_scroll(ui, &output, true, true);
+            output.inner
         };
 
         if response.changed() {
@@ -783,6 +795,75 @@ impl MarkRushApp {
             self.render_lines = parse_markdown_lines(&self.document_text);
             self.rebuild_search();
         }
+    }
+
+    fn apply_middle_mouse_scroll<R>(
+        &mut self,
+        ui: &mut egui::Ui,
+        output: &egui::containers::scroll_area::ScrollAreaOutput<R>,
+        allow_x: bool,
+        allow_y: bool,
+    ) {
+        let (middle_down, pointer_pos) = ui.input(|input| {
+            (
+                input.pointer.button_down(egui::PointerButton::Middle),
+                input.pointer.latest_pos(),
+            )
+        });
+
+        if !middle_down {
+            self.middle_drag_scroll = None;
+            return;
+        }
+
+        let Some(pointer_pos) = pointer_pos else {
+            return;
+        };
+
+        let is_active = self
+            .middle_drag_scroll
+            .as_ref()
+            .is_some_and(|drag| drag.scroll_id == output.id);
+
+        if !is_active {
+            if self.middle_drag_scroll.is_none()
+                && output.inner_rect.expand(18.0).contains(pointer_pos)
+            {
+                self.middle_drag_scroll = Some(MiddleDragScroll {
+                    scroll_id: output.id,
+                    last_pos: pointer_pos,
+                });
+                ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
+
+        let Some(drag) = self.middle_drag_scroll.as_mut() else {
+            return;
+        };
+
+        let delta = pointer_pos - drag.last_pos;
+        drag.last_pos = pointer_pos;
+        ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
+
+        if delta == egui::Vec2::ZERO {
+            return;
+        }
+
+        let mut state = output.state;
+        let max_offset = output.content_size - output.inner_rect.size();
+
+        if allow_x {
+            state.offset.x = (state.offset.x + delta.x).clamp(0.0, max_offset.x.max(0.0));
+        }
+
+        if allow_y {
+            state.offset.y = (state.offset.y + delta.y).clamp(0.0, max_offset.y.max(0.0));
+        }
+
+        state.store(ui.ctx(), output.id);
+        ui.ctx().request_repaint();
     }
 
     fn draw_save_prompt(&mut self, ctx: &egui::Context) {
