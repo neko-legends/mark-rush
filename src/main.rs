@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mdx", "mkd", "rmd"];
 const MAX_STORED_STATUS: usize = 180;
 const MAX_STORED_FILE_VIEW_STATES: usize = 250;
+const MIDDLE_SCROLL_DEAD_ZONE: f32 = 8.0;
+const MIDDLE_SCROLL_MAX_SPEED: f32 = 80.0;
 const READER_ROW_HEIGHT: f32 = 23.0;
 const UNWRAPPED_DOCUMENT_WIDTH: f32 = 12_000.0;
 
@@ -196,7 +198,7 @@ enum TreeAction {
 #[derive(Clone, Copy)]
 struct MiddleDragScroll {
     scroll_id: egui::Id,
-    last_pos: egui::Pos2,
+    start_pos: egui::Pos2,
 }
 
 struct MarkRushApp {
@@ -855,7 +857,7 @@ impl MarkRushApp {
             {
                 self.middle_drag_scroll = Some(MiddleDragScroll {
                     scroll_id: output.id,
-                    last_pos: pointer_pos,
+                    start_pos: pointer_pos,
                 });
                 ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
                 ui.ctx().request_repaint();
@@ -867,26 +869,33 @@ impl MarkRushApp {
             return;
         };
 
-        let delta = pointer_pos - drag.last_pos;
-        drag.last_pos = pointer_pos;
+        let delta = pointer_pos - drag.start_pos;
         ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
-
-        if delta == egui::Vec2::ZERO {
-            return;
-        }
 
         let mut state = output.state;
         let max_offset = output.content_size - output.inner_rect.size();
+        let frame_scale = ui.input(|input| (input.stable_dt / (1.0 / 60.0)).clamp(0.25, 3.0));
+        let mut changed = false;
 
         if allow_x {
-            state.offset.x = (state.offset.x + delta.x).clamp(0.0, max_offset.x.max(0.0));
+            let scroll_delta = middle_scroll_step(delta.x) * frame_scale;
+            if scroll_delta != 0.0 {
+                state.offset.x = (state.offset.x + scroll_delta).clamp(0.0, max_offset.x.max(0.0));
+                changed = true;
+            }
         }
 
         if allow_y {
-            state.offset.y = (state.offset.y + delta.y).clamp(0.0, max_offset.y.max(0.0));
+            let scroll_delta = middle_scroll_step(delta.y) * frame_scale;
+            if scroll_delta != 0.0 {
+                state.offset.y = (state.offset.y + scroll_delta).clamp(0.0, max_offset.y.max(0.0));
+                changed = true;
+            }
         }
 
-        state.store(ui.ctx(), output.id);
+        if changed {
+            state.store(ui.ctx(), output.id);
+        }
         ui.ctx().request_repaint();
     }
 
@@ -1280,7 +1289,15 @@ impl MarkRushApp {
         style.spacing.interact_size = egui::vec2(40.0, 34.0);
         style.spacing.combo_width = 145.0;
         style.spacing.text_edit_width = 280.0;
-        style.spacing.scroll.bar_width = 10.0;
+        style.spacing.scroll = egui::style::ScrollStyle::floating();
+        style.spacing.scroll.bar_width = 18.0;
+        style.spacing.scroll.floating_width = 5.0;
+        style.spacing.scroll.floating_allocated_width = 6.0;
+        style.spacing.scroll.handle_min_length = 44.0;
+        style.spacing.scroll.active_background_opacity = 0.45;
+        style.spacing.scroll.active_handle_opacity = 0.8;
+        style.spacing.scroll.interact_background_opacity = 0.85;
+        style.spacing.scroll.interact_handle_opacity = 1.0;
         style.visuals = visuals;
         ctx.set_global_style(style);
     }
@@ -1883,6 +1900,16 @@ fn display_path(path: &Path) -> String {
     } else {
         path.into_owned()
     }
+}
+
+fn middle_scroll_step(distance: f32) -> f32 {
+    let magnitude = distance.abs();
+    if magnitude <= MIDDLE_SCROLL_DEAD_ZONE {
+        return 0.0;
+    }
+
+    let speed = ((magnitude - MIDDLE_SCROLL_DEAD_ZONE) / 10.0).powf(1.2) * 4.0;
+    distance.signum() * speed.min(MIDDLE_SCROLL_MAX_SPEED)
 }
 
 fn document_line_count(text: &str) -> usize {
