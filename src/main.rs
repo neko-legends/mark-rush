@@ -35,7 +35,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("MarkRush")
             .with_inner_size(window_size)
-            .with_min_inner_size([840.0, 520.0]),
+            .with_min_inner_size([840.0, 520.0])
+            .with_icon(load_app_icon()),
         ..Default::default()
     };
 
@@ -44,6 +45,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(MarkRushApp::new(cc)))),
     )
+}
+
+fn load_app_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/MarkRush-256.png"))
+        .expect("embedded app icon PNG should be valid")
 }
 
 #[derive(Clone, Serialize, Deserialize)]
