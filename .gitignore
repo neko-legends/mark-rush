@@ -1,0 +1,33 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# .NET build outputs
+bin/
+obj/
+TestResults/
+*.user
+*.suo
+*.rsuser
+
+# Logs and local runtime state
+*.log
+*.crash.log
+.localappdata/
+.dotnet_home/
+
+# Packages and archives
+*.nupkg
+*.zip
+*.7z
+*.rar
+
+# Published binaries
+*.exe
+*.dll
+*.pdb
