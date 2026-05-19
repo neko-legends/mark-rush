@@ -10,7 +10,6 @@ struct BuildTime {
     day: u32,
     hour: u32,
     minute: u32,
-    second: u32,
 }
 
 struct GitInfo {
@@ -73,13 +72,9 @@ fn build_version() -> BuildVersion {
     } else {
         format!("g{}", git.commit)
     };
-    let patch = format!(
-        "{}{:02}{:02}{:02}",
-        time.day, time.hour, time.minute, time.second
-    );
-    let date = format!("{:04}-{:02}-{:02}", time.year, time.month, time.day);
-    let version = format!("{}.{}.{}+{}", time.year, time.month, patch, metadata);
-    let label = format!("ver {date} · {metadata}");
+    let release_year = time.year.rem_euclid(100);
+    let version = format!("v{}.{}.{}+{}", release_year, time.month, time.day, metadata);
+    let label = format!("v{release_year}.{}.{}", time.month, time.day);
 
     BuildVersion {
         version,
@@ -131,7 +126,6 @@ fn current_build_time() -> BuildTime {
         day,
         hour: seconds_of_day / 3_600,
         minute: (seconds_of_day % 3_600) / 60,
-        second: seconds_of_day % 60,
     }
 }
 
@@ -146,7 +140,6 @@ fn parse_build_stamp(stamp: &str) -> Option<BuildTime> {
         day: stamp[6..8].parse().ok()?,
         hour: stamp[8..10].parse().ok()?,
         minute: stamp[10..12].parse().ok()?,
-        second: stamp[12..14].parse().ok()?,
     })
 }
 

@@ -83,19 +83,19 @@ If Windows resource embedding fails, install the Visual Studio Build Tools or Wi
 
 ## Versioning
 
-Release builds are stamped at compile time with a date plus git hash.
+Release builds are stamped at compile time with a short date version plus git hash.
 
 The full build version is shaped like:
 
 ```text
-2026.5.11071530+gabcdef12
+v26.5.19+gabcdef12
 ```
 
 Meaning:
 
-- `2026` = UTC build year
+- `v26` = UTC build year, shortened to two digits
 - `5` = UTC build month
-- `11071530` = UTC day and time, here day 11 at 07:15:30
+- `19` = UTC build day
 - `gabcdef12` = git commit hash
 - `.dirty` is appended when the build was made with uncommitted tracked changes
 

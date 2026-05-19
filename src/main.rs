@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use directories::ProjectDirs;
 use eframe::egui;
@@ -28,7 +28,7 @@ const MIN_WINDOW_SIZE: [f32; 2] = [840.0, 520.0];
 const FIRST_LAUNCH_WINDOW_SCREEN_SCALE: f32 = 0.5;
 const UNWRAPPED_DOCUMENT_WIDTH: f32 = 12_000.0;
 const TOPBAR_PATH_COPY_WIDTH: f32 = 30.0;
-const TOPBAR_LEFT_CONTROLS_WIDTH: f32 = 116.0;
+const TOPBAR_LEFT_CONTROLS_WIDTH: f32 = 220.0;
 const TOPBAR_TOOLBAR_HEIGHT: f32 = 34.0;
 const TOPBAR_ICON_BUTTON_SIZE: f32 = 32.0;
 const TOPBAR_MIN_FONT_SIZE_WIDTH: f32 = 64.0;
@@ -37,6 +37,10 @@ const TOPBAR_MIN_THEME_WIDTH: f32 = 92.0;
 const TOPBAR_FONT_SIZE_WIDTH: f32 = 82.0;
 const TOPBAR_FONT_WIDTH: f32 = 130.0;
 const TOPBAR_THEME_WIDTH: f32 = 145.0;
+const TOPBAR_FILE_ACTION_COUNT: f32 = 2.0;
+const CODE_BLOCK_COPY_GUTTER_WIDTH: f32 = 32.0;
+const CODE_BLOCK_COPY_BUTTON_SIZE: f32 = 24.0;
+const CODE_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1_200);
 const READER_HORIZONTAL_PADDING: f32 = 36.0;
 const READER_MIN_OVERSCAN: f32 = 900.0;
 const READER_OVERSCAN_VIEWPORTS: f32 = 1.5;
@@ -96,6 +100,7 @@ struct AppSettings {
     last_file_path: Option<PathBuf>,
     theme_name: String,
     word_wrap: bool,
+    render_markdown: bool,
     document_font_family: String,
     document_font_size: f32,
     window_width: Option<f32>,
@@ -110,6 +115,7 @@ impl Default for AppSettings {
             last_file_path: None,
             theme_name: "EVA Dark".to_owned(),
             word_wrap: true,
+            render_markdown: true,
             document_font_family: DEFAULT_DOCUMENT_FONT_FAMILY.to_owned(),
             document_font_size: DEFAULT_DOCUMENT_FONT_SIZE,
             window_width: None,
@@ -279,6 +285,12 @@ struct SearchMatch {
     line_index: usize,
 }
 
+#[derive(Clone, Copy)]
+struct CodeCopyFeedback {
+    line_index: usize,
+    started: Instant,
+}
+
 #[derive(Clone)]
 enum PendingAction {
     OpenFile(PathBuf),
@@ -290,6 +302,8 @@ enum PendingAction {
 enum TreeAction {
     OpenFile(PathBuf),
     ShowInBrowser(PathBuf),
+    CopyPath(PathBuf),
+    Rename(PathBuf),
 }
 
 #[derive(Clone, Copy)]
@@ -309,6 +323,7 @@ struct MarkRushApp {
     settings_path: Option<PathBuf>,
     root: Option<TreeEntry>,
     current_file: Option<PathBuf>,
+    current_file_modified: Option<SystemTime>,
     document_text: String,
     saved_text: String,
     render_lines: Vec<RenderLine>,
@@ -317,6 +332,7 @@ struct MarkRushApp {
     search_query: String,
     search_matches: Vec<SearchMatch>,
     current_match: usize,
+    code_copy_feedback: Option<CodeCopyFeedback>,
     status: String,
     theme_index: usize,
     pending_action: Option<PendingAction>,
@@ -326,6 +342,11 @@ struct MarkRushApp {
     focus_search: bool,
     middle_drag_scroll: Option<MiddleDragScroll>,
     initial_window_fit: InitialWindowFit,
+    window_focused: bool,
+    show_new_file_prompt: bool,
+    new_file_name: String,
+    rename_target: Option<PathBuf>,
+    rename_name: String,
 }
 
 impl MarkRushApp {
@@ -341,12 +362,16 @@ impl MarkRushApp {
         } else {
             InitialWindowFit::PendingResize
         };
+        let window_focused = cc
+            .egui_ctx
+            .input(|input| input.viewport().focused.unwrap_or(true));
 
         let mut app = Self {
             settings,
             settings_path,
             root: None,
             current_file: None,
+            current_file_modified: None,
             document_text: String::new(),
             saved_text: String::new(),
             render_lines: Vec::new(),
@@ -355,6 +380,7 @@ impl MarkRushApp {
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match: 0,
+            code_copy_feedback: None,
             status: "Ready".to_owned(),
             theme_index,
             pending_action: None,
@@ -364,6 +390,11 @@ impl MarkRushApp {
             focus_search: false,
             middle_drag_scroll: None,
             initial_window_fit,
+            window_focused,
+            show_new_file_prompt: false,
+            new_file_name: "untitled.md".to_owned(),
+            rename_target: None,
+            rename_name: String::new(),
         };
 
         app.apply_startup_target();
@@ -418,6 +449,7 @@ impl MarkRushApp {
             self.remember_window_size(ui.ctx());
         }
         self.handle_shortcuts(ui);
+        self.handle_focus_reload(ui.ctx());
 
         let full_rect = ui.max_rect();
         let theme = self.theme().clone();
@@ -455,6 +487,12 @@ impl MarkRushApp {
         if self.show_save_prompt {
             self.draw_save_prompt(ui.ctx());
         }
+        if self.show_new_file_prompt {
+            self.draw_new_file_prompt(ui.ctx());
+        }
+        if self.rename_target.is_some() {
+            self.draw_rename_prompt(ui.ctx());
+        }
     }
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
@@ -482,8 +520,15 @@ impl MarkRushApp {
                             self.open_folder_dialog();
                         }
 
-                        if themed_button(ui, "Refresh", &theme).clicked() {
-                            self.refresh_tree();
+                        if ui
+                            .add_enabled(
+                                self.current_file.is_some(),
+                                egui::Button::new("New").fill(theme.button),
+                            )
+                            .on_hover_text("Create a Markdown file beside the selected file")
+                            .clicked()
+                        {
+                            self.open_new_file_prompt();
                         }
                     });
 
@@ -513,7 +558,7 @@ impl MarkRushApp {
                                 if let Some(action) =
                                     show_tree(ui, root, self.current_file.as_deref(), &theme)
                                 {
-                                    self.handle_tree_action(action);
+                                    self.handle_tree_action(ui.ctx(), action);
                                 }
                             } else {
                                 ui.label(
@@ -685,6 +730,20 @@ impl MarkRushApp {
                                     self.settings.word_wrap = wrap;
                                     self.save_settings();
                                 }
+
+                                let mode_label = if self.settings.render_markdown {
+                                    "Markdown"
+                                } else {
+                                    "Plain"
+                                };
+                                if egui::Button::new(mode_label)
+                                    .fill(theme.button)
+                                    .ui(ui)
+                                    .clicked()
+                                {
+                                    self.settings.render_markdown = !self.settings.render_markdown;
+                                    self.save_settings();
+                                }
                             },
                         );
 
@@ -755,12 +814,6 @@ impl MarkRushApp {
         let can_save = self.current_file.is_some() && (self.dirty || self.edit_mode);
         if toolbar_icon_button(ui, "💾", "Save", can_save, theme).clicked() {
             self.save_current_file();
-        }
-
-        if toolbar_icon_button(ui, "↻", "Reload", self.current_file.is_some(), theme).clicked() {
-            if let Some(path) = self.current_file.clone() {
-                self.request_action(PendingAction::OpenFile(path));
-            }
         }
 
         if toolbar_icon_button(
@@ -869,6 +922,11 @@ impl MarkRushApp {
             return;
         }
 
+        if !self.settings.render_markdown {
+            self.draw_plain_reader(ui);
+            return;
+        }
+
         let current_match_line = self
             .search_matches
             .get(self.current_match)
@@ -880,6 +938,13 @@ impl MarkRushApp {
         let font_family = self.document_font_family();
         let row_height = reader_row_height(font_size);
         let mut clicked_link = None;
+        let mut copied_code_line = None;
+        if self
+            .code_copy_feedback
+            .is_some_and(|feedback| feedback.started.elapsed() >= CODE_COPY_FEEDBACK_DURATION)
+        {
+            self.code_copy_feedback = None;
+        }
 
         let file_scroll_id = egui::Id::new("reader-scroll").with(
             self.current_file
@@ -931,7 +996,7 @@ impl MarkRushApp {
                 for index in start..end {
                     if let Some(line) = self.render_lines.get(index) {
                         let is_match = current_match_line == Some(index);
-                        if let Some(target) = draw_render_line(
+                        let output = draw_render_line(
                             ui,
                             line,
                             &theme,
@@ -939,8 +1004,13 @@ impl MarkRushApp {
                             wrap,
                             font_size,
                             &font_family,
-                        ) {
+                            code_copy_feedback_alpha(self.code_copy_feedback, index),
+                        );
+                        if let Some(target) = output.clicked_link {
                             clicked_link = Some(target);
+                        }
+                        if output.copied_code {
+                            copied_code_line = Some(index);
                         }
                     }
                 }
@@ -964,7 +1034,7 @@ impl MarkRushApp {
                     for index in row_range {
                         if let Some(line) = self.render_lines.get(index) {
                             let is_match = current_match_line == Some(index);
-                            if let Some(target) = draw_render_line(
+                            let output = draw_render_line(
                                 ui,
                                 line,
                                 &theme,
@@ -972,8 +1042,13 @@ impl MarkRushApp {
                                 wrap,
                                 font_size,
                                 &font_family,
-                            ) {
+                                code_copy_feedback_alpha(self.code_copy_feedback, index),
+                            );
+                            if let Some(target) = output.clicked_link {
                                 clicked_link = Some(target);
+                            }
+                            if output.copied_code {
+                                copied_code_line = Some(index);
                             }
                         }
                     }
@@ -996,6 +1071,59 @@ impl MarkRushApp {
         if let Some(target) = clicked_link {
             self.follow_link(&target);
         }
+
+        if let Some(line_index) = copied_code_line {
+            self.code_copy_feedback = Some(CodeCopyFeedback {
+                line_index,
+                started: Instant::now(),
+            });
+        }
+        if self.code_copy_feedback.is_some() {
+            ui.ctx().request_repaint_after(ANIMATION_FRAME_INTERVAL);
+        }
+    }
+
+    fn draw_plain_reader(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme().clone();
+        let font_size = self.document_font_size();
+        let font_family = self.document_font_family();
+
+        let file_scroll_id = egui::Id::new("plain-reader-scroll").with(
+            self.current_file
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+        let mut scroll = if self.settings.word_wrap {
+            egui::ScrollArea::vertical()
+        } else {
+            egui::ScrollArea::both()
+        }
+        .id_salt(file_scroll_id)
+        .content_margin(egui::Margin::symmetric(18, 12))
+        .auto_shrink([false, false]);
+
+        if let Some(line) = self.pending_scroll_line.take() {
+            scroll = scroll.vertical_scroll_offset(line as f32 * reader_row_height(font_size));
+        }
+
+        let output = scroll.show(ui, |ui| {
+            if !self.settings.word_wrap {
+                ui.set_min_width(UNWRAPPED_DOCUMENT_WIDTH);
+            }
+
+            let label = egui::Label::new(
+                egui::RichText::new(&self.document_text)
+                    .font(egui::FontId::new(font_size, font_family))
+                    .color(theme.text),
+            );
+            if self.settings.word_wrap {
+                ui.add(label.wrap());
+            } else {
+                ui.add(label);
+            }
+        });
+        self.apply_middle_mouse_scroll(ui, &output, !self.settings.word_wrap, true);
     }
 
     fn draw_editor(&mut self, ui: &mut egui::Ui) {
@@ -1186,6 +1314,83 @@ impl MarkRushApp {
             });
     }
 
+    fn draw_new_file_prompt(&mut self, ctx: &egui::Context) {
+        let theme = self.theme().clone();
+        egui::Window::new("New file")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Create beside the selected file:");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.new_file_name)
+                        .desired_width(280.0)
+                        .hint_text("filename.md"),
+                );
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    self.create_new_file_from_prompt();
+                }
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if egui::Button::new("Create")
+                        .fill(theme.button)
+                        .ui(ui)
+                        .clicked()
+                    {
+                        self.create_new_file_from_prompt();
+                    }
+
+                    if egui::Button::new("Cancel")
+                        .fill(theme.button)
+                        .ui(ui)
+                        .clicked()
+                    {
+                        self.show_new_file_prompt = false;
+                    }
+                });
+            });
+    }
+
+    fn draw_rename_prompt(&mut self, ctx: &egui::Context) {
+        let theme = self.theme().clone();
+        egui::Window::new("Rename")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("New name:");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.rename_name)
+                        .desired_width(280.0)
+                        .hint_text("filename.md"),
+                );
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    self.rename_item_from_prompt();
+                }
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if egui::Button::new("Rename")
+                        .fill(theme.button)
+                        .ui(ui)
+                        .clicked()
+                    {
+                        self.rename_item_from_prompt();
+                    }
+
+                    if egui::Button::new("Cancel")
+                        .fill(theme.button)
+                        .ui(ui)
+                        .clicked()
+                    {
+                        self.rename_target = None;
+                        self.rename_name.clear();
+                    }
+                });
+            });
+    }
+
     fn handle_shortcuts(&mut self, ui: &mut egui::Ui) {
         ui.input(|input| {
             if input.key_pressed(egui::Key::S) && input.modifiers.command {
@@ -1229,19 +1434,164 @@ impl MarkRushApp {
         });
     }
 
+    fn handle_focus_reload(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(self.window_focused));
+        let regained_focus = focused && !self.window_focused;
+        self.window_focused = focused;
+
+        if regained_focus {
+            self.refresh_tree_silent();
+            self.reload_current_file_if_changed_on_disk();
+        }
+    }
+
     fn open_folder_dialog(&mut self) {
         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
             self.request_action(PendingAction::SetRoot(folder));
         }
     }
 
-    fn handle_tree_action(&mut self, action: TreeAction) {
+    fn open_new_file_prompt(&mut self) {
+        if self.current_file_parent().is_none() {
+            self.set_status("Select a file before creating a new file");
+            return;
+        }
+
+        self.new_file_name = unique_markdown_file_name(
+            &self
+                .current_file_parent()
+                .unwrap_or_else(|| PathBuf::from(".")),
+            "untitled.md",
+        );
+        self.show_new_file_prompt = true;
+    }
+
+    fn create_new_file_from_prompt(&mut self) {
+        let Some(parent) = self.current_file_parent() else {
+            self.set_status("Select a file before creating a new file");
+            self.show_new_file_prompt = false;
+            return;
+        };
+        let Some(file_name) = normalized_prompt_file_name(&self.new_file_name, true) else {
+            self.set_status("Enter a valid file name");
+            return;
+        };
+
+        let target = parent.join(file_name);
+        if target.exists() {
+            self.set_status("A file with that name already exists");
+            return;
+        }
+
+        match fs::write(&target, b"") {
+            Ok(()) => {
+                self.show_new_file_prompt = false;
+                self.refresh_tree();
+                self.request_action(PendingAction::OpenFile(target));
+            }
+            Err(error) => self.set_status(format!("Could not create file: {error}")),
+        }
+    }
+
+    fn open_rename_prompt(&mut self, path: PathBuf) {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            self.set_status("Could not rename this item");
+            return;
+        };
+
+        self.rename_name = name.to_owned();
+        self.rename_target = Some(path);
+    }
+
+    fn rename_item_from_prompt(&mut self) {
+        let Some(source) = self.rename_target.clone() else {
+            return;
+        };
+        let Some(parent) = source.parent() else {
+            self.set_status("Could not rename this item");
+            return;
+        };
+        let Some(file_name) = normalized_prompt_file_name(&self.rename_name, false) else {
+            self.set_status("Enter a valid name");
+            return;
+        };
+
+        let target = parent.join(file_name);
+        if source == target {
+            self.rename_target = None;
+            self.rename_name.clear();
+            return;
+        }
+        if target.exists() {
+            self.set_status("An item with that name already exists");
+            return;
+        }
+
+        match fs::rename(&source, &target) {
+            Ok(()) => {
+                self.after_item_renamed(&source, &target);
+                self.rename_target = None;
+                self.rename_name.clear();
+                self.set_status(format!("Renamed to {}", display_path(&target)));
+            }
+            Err(error) => self.set_status(format!("Rename failed: {error}")),
+        }
+    }
+
+    fn after_item_renamed(&mut self, source: &Path, target: &Path) {
+        if let Some(current_file) = self.current_file.clone() {
+            if current_file == source {
+                self.current_file = Some(target.to_path_buf());
+                self.current_file_modified = file_modified_time(target).ok();
+                self.settings.last_file_path = Some(target.to_path_buf());
+                self.move_file_view_state(source, target);
+            } else if let Ok(relative) = current_file.strip_prefix(source) {
+                let renamed_file = target.join(relative);
+                self.current_file = Some(renamed_file.clone());
+                self.current_file_modified = file_modified_time(&renamed_file).ok();
+                self.settings.last_file_path = Some(renamed_file);
+            }
+        }
+
+        if self.root.as_ref().is_some_and(|root| root.path == source) {
+            self.root = Some(TreeEntry::root(target.to_path_buf()));
+            self.settings.last_root_path = Some(target.to_path_buf());
+            self.known_roots.remove(source);
+            self.known_roots.insert(target.to_path_buf());
+        } else {
+            self.refresh_tree();
+        }
+
+        self.save_settings();
+    }
+
+    fn move_file_view_state(&mut self, source: &Path, target: &Path) {
+        if let Some(state) = self.settings.file_view_states.remove(source) {
+            self.settings
+                .file_view_states
+                .insert(target.to_path_buf(), state);
+        }
+    }
+
+    fn current_file_parent(&self) -> Option<PathBuf> {
+        self.current_file
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+    }
+
+    fn handle_tree_action(&mut self, ctx: &egui::Context, action: TreeAction) {
         match action {
             TreeAction::OpenFile(path) => self.request_open_file(path),
             TreeAction::ShowInBrowser(path) => match show_in_file_browser(&path) {
                 Ok(()) => self.set_status("Opened item in system file browser"),
                 Err(error) => self.set_status(format!("Could not show item: {error}")),
             },
+            TreeAction::CopyPath(path) => {
+                ctx.copy_text(display_path(&path));
+                self.set_status("Copied item path");
+            }
+            TreeAction::Rename(path) => self.open_rename_prompt(path),
         }
     }
 
@@ -1294,13 +1644,46 @@ impl MarkRushApp {
     }
 
     fn refresh_tree(&mut self) {
-        if let Some(root) = self.root.as_ref().map(|entry| entry.path.clone()) {
-            self.root = Some(TreeEntry::root(root));
+        if self.refresh_tree_silent() {
             self.set_status("Folder tree refreshed");
         }
     }
 
+    fn refresh_tree_silent(&mut self) -> bool {
+        if let Some(root) = self.root.as_ref().map(|entry| entry.path.clone()) {
+            self.root = Some(TreeEntry::root(root));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reload_current_file_if_changed_on_disk(&mut self) {
+        let Some(path) = self.current_file.clone() else {
+            return;
+        };
+        let Ok(modified) = file_modified_time(&path) else {
+            return;
+        };
+
+        if self.current_file_modified == Some(modified) {
+            return;
+        }
+
+        self.current_file_modified = Some(modified);
+        if self.dirty {
+            self.set_status("File changed on disk; unsaved edits kept");
+            return;
+        }
+
+        self.load_file_with_status(path, "Auto-refreshed");
+    }
+
     fn load_file(&mut self, path: PathBuf) {
+        self.load_file_with_status(path, "Loaded");
+    }
+
+    fn load_file_with_status(&mut self, path: PathBuf, verb: &str) {
         let full_path = absolute_path(&path);
         match fs::read(&full_path) {
             Ok(bytes) => {
@@ -1308,8 +1691,10 @@ impl MarkRushApp {
                 self.saved_text = self.document_text.clone();
                 self.render_lines = parse_markdown_lines(&self.document_text);
                 self.current_file = Some(full_path.clone());
+                self.current_file_modified = file_modified_time(&full_path).ok();
                 self.dirty = false;
                 self.edit_mode = false;
+                self.code_copy_feedback = None;
                 self.settings.last_file_path = Some(full_path.clone());
                 self.pending_scroll_line = self
                     .settings
@@ -1318,7 +1703,7 @@ impl MarkRushApp {
                     .map(|state| state.reader_line);
                 self.save_settings();
                 self.rebuild_search();
-                self.set_status(format!("Loaded {}", display_path(&full_path)));
+                self.set_status(format!("{verb} {}", display_path(&full_path)));
             }
             Err(error) => {
                 self.set_status(format!("Could not load file: {error}"));
@@ -1328,11 +1713,13 @@ impl MarkRushApp {
 
     fn clear_file(&mut self) {
         self.current_file = None;
+        self.current_file_modified = None;
         self.document_text.clear();
         self.saved_text.clear();
         self.render_lines.clear();
         self.dirty = false;
         self.edit_mode = false;
+        self.code_copy_feedback = None;
         self.search_matches.clear();
         self.current_match = 0;
         self.settings.last_file_path = None;
@@ -1347,6 +1734,7 @@ impl MarkRushApp {
         match fs::write(&path, self.document_text.as_bytes()) {
             Ok(()) => {
                 self.saved_text = self.document_text.clone();
+                self.current_file_modified = file_modified_time(&path).ok();
                 self.dirty = false;
                 self.render_lines = parse_markdown_lines(&self.document_text);
                 self.rebuild_search();
@@ -1781,6 +2169,14 @@ fn show_tree(
                 action = Some(TreeAction::ShowInBrowser(path.clone()));
                 ui.close();
             }
+            if ui.button("Copy Folder Path").clicked() {
+                action = Some(TreeAction::CopyPath(path.clone()));
+                ui.close();
+            }
+            if ui.button("Rename").clicked() {
+                action = Some(TreeAction::Rename(path.clone()));
+                ui.close();
+            }
         });
         action
     } else {
@@ -1803,9 +2199,22 @@ fn show_tree(
                 action = Some(TreeAction::ShowInBrowser(path.clone()));
                 ui.close();
             }
+            if ui.button("Copy File Path").clicked() {
+                action = Some(TreeAction::CopyPath(path.clone()));
+                ui.close();
+            }
+            if ui.button("Rename").clicked() {
+                action = Some(TreeAction::Rename(path.clone()));
+                ui.close();
+            }
         });
         action
     }
+}
+
+struct RenderLineOutput {
+    clicked_link: Option<String>,
+    copied_code: bool,
 }
 
 fn draw_render_line(
@@ -1816,8 +2225,10 @@ fn draw_render_line(
     wrap: bool,
     font_size: f32,
     font_family: &egui::FontFamily,
-) -> Option<String> {
+    copy_feedback_alpha: Option<f32>,
+) -> RenderLineOutput {
     let mut clicked_link = None;
+    let mut copied_code = false;
     let fill = if is_match {
         theme.search_highlight
     } else {
@@ -1868,7 +2279,15 @@ fn draw_render_line(
                 });
             }
             RenderKind::CodeBlock { .. } => {
-                draw_code_block(ui, line, theme, text_color, wrap, font_size);
+                copied_code = draw_code_block(
+                    ui,
+                    line,
+                    theme,
+                    text_color,
+                    wrap,
+                    font_size,
+                    copy_feedback_alpha,
+                );
             }
             RenderKind::Rule => {
                 ui.separator();
@@ -1887,7 +2306,10 @@ fn draw_render_line(
         }
     });
 
-    clicked_link
+    RenderLineOutput {
+        clicked_link,
+        copied_code,
+    }
 }
 
 fn draw_code_block(
@@ -1897,58 +2319,80 @@ fn draw_code_block(
     text_color: egui::Color32,
     wrap: bool,
     font_size: f32,
-) {
+    copy_feedback_alpha: Option<f32>,
+) -> bool {
     let (is_first, is_last) = match line.kind {
         RenderKind::CodeBlock { is_first, is_last } => (is_first, is_last),
         _ => (true, true),
     };
     let top_margin = if is_first { 8 } else { 2 };
     let bottom_margin = if is_last { 8 } else { 2 };
+    let mut copied_code = false;
 
-    egui::Frame::new()
-        .fill(theme.code)
-        .stroke(egui::Stroke::new(1.0, theme.border))
-        .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin {
-            left: 10,
-            right: 10,
-            top: top_margin,
-            bottom: bottom_margin,
-        })
-        .show(ui, |ui| {
-            let code_text = if line.text.is_empty() {
-                " "
-            } else {
-                line.text.as_str()
-            };
-            let label = egui::Label::new(
-                egui::RichText::new(code_text)
-                    .font(egui::FontId::new(font_size, egui::FontFamily::Monospace))
-                    .color(text_color),
-            );
-            if wrap {
-                ui.add(label.wrap());
-            } else {
-                ui.add(label);
-            }
-
-            if is_last {
-                ui.add_space(6.0);
-                ui.horizontal_centered(|ui| {
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(CODE_BLOCK_COPY_GUTTER_WIDTH, CODE_BLOCK_COPY_BUTTON_SIZE),
+            egui::Layout::left_to_right(egui::Align::Min),
+            |ui| {
+                if is_first {
                     let copy_response = ui
                         .add(
                             egui::Button::new(egui::RichText::new("📋").size(12.0))
                                 .fill(theme.button)
-                                .min_size(egui::vec2(22.0, 20.0)),
+                                .min_size(egui::vec2(
+                                    CODE_BLOCK_COPY_BUTTON_SIZE,
+                                    CODE_BLOCK_COPY_BUTTON_SIZE,
+                                )),
                         )
                         .on_hover_text("Copy text block");
                     if copy_response.clicked() {
                         ui.ctx()
                             .copy_text(line.copy_text.clone().unwrap_or_else(|| line.text.clone()));
+                        copied_code = true;
                     }
-                });
-            }
-        });
+                }
+            },
+        );
+
+        if let Some(alpha) = copy_feedback_alpha {
+            ui.label(
+                egui::RichText::new("Copied")
+                    .size((font_size - 1.0).max(10.0))
+                    .color(theme.accent.gamma_multiply(alpha)),
+            );
+            ui.add_space(6.0);
+        }
+
+        if line.text.is_empty() {
+            ui.add_space((font_size * 0.55).max(8.0));
+            return;
+        }
+
+        egui::Frame::new()
+            .fill(theme.code)
+            .stroke(egui::Stroke::new(1.0, theme.border))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin {
+                left: 10,
+                right: 10,
+                top: top_margin,
+                bottom: bottom_margin,
+            })
+            .show(ui, |ui| {
+                let label = egui::Label::new(
+                    egui::RichText::new(line.text.as_str())
+                        .font(egui::FontId::new(font_size, egui::FontFamily::Monospace))
+                        .color(text_color),
+                );
+                if wrap {
+                    ui.add(label.wrap());
+                } else {
+                    ui.add(label);
+                }
+            });
+    });
+
+    copied_code
 }
 
 fn themed_button(ui: &mut egui::Ui, label: &str, theme: &AppTheme) -> egui::Response {
@@ -2163,26 +2607,12 @@ fn push_code_block_line(code_lines: &mut Vec<String>, line: &str) {
 
 fn flush_code_block_lines(lines: &mut Vec<RenderLine>, code_lines: &mut Vec<String>) {
     let copy_text = code_lines.join("\n");
-    if code_lines.is_empty() {
-        lines.push(RenderLine::code_block_line(
-            String::new(),
-            true,
-            true,
-            Some(copy_text),
-        ));
-        return;
-    }
-
-    let last_index = code_lines.len() - 1;
-    for (index, line) in code_lines.iter().enumerate() {
-        let is_last = index == last_index;
-        lines.push(RenderLine::code_block_line(
-            line.clone(),
-            index == 0,
-            is_last,
-            is_last.then(|| copy_text.clone()),
-        ));
-    }
+    lines.push(RenderLine::code_block_line(
+        copy_text.clone(),
+        true,
+        true,
+        Some(copy_text),
+    ));
     code_lines.clear();
 }
 
@@ -2413,6 +2843,10 @@ fn absolute_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn file_modified_time(path: &Path) -> io::Result<SystemTime> {
+    fs::metadata(path)?.modified()
+}
+
 fn display_path(path: &Path) -> String {
     let path = path.to_string_lossy();
     if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
@@ -2422,6 +2856,67 @@ fn display_path(path: &Path) -> String {
     } else {
         path.into_owned()
     }
+}
+
+fn code_copy_feedback_alpha(feedback: Option<CodeCopyFeedback>, line_index: usize) -> Option<f32> {
+    let feedback = feedback?;
+    if feedback.line_index != line_index {
+        return None;
+    }
+
+    let elapsed = feedback.started.elapsed();
+    if elapsed >= CODE_COPY_FEEDBACK_DURATION {
+        return None;
+    }
+
+    let progress = elapsed.as_secs_f32() / CODE_COPY_FEEDBACK_DURATION.as_secs_f32();
+    Some((1.0 - progress).clamp(0.0, 1.0))
+}
+
+fn normalized_prompt_file_name(input: &str, default_markdown_extension: bool) -> Option<String> {
+    let mut name = input.trim().to_owned();
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    if name
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
+        return None;
+    }
+
+    if default_markdown_extension && Path::new(&name).extension().is_none() {
+        name.push_str(".md");
+    }
+
+    Some(name)
+}
+
+fn unique_markdown_file_name(parent: &Path, base_name: &str) -> String {
+    if !parent.join(base_name).exists() {
+        return base_name.to_owned();
+    }
+
+    let stem = Path::new(base_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("untitled");
+    let extension = Path::new(base_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("md");
+
+    for index in 2..1000 {
+        let candidate = format!("{stem}-{index}.{extension}");
+        if !parent.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+
+    base_name.to_owned()
 }
 
 fn middle_scroll_step(distance: f32) -> f32 {
@@ -2495,7 +2990,7 @@ fn topbar_left_controls_width(row_width: f32) -> f32 {
 }
 
 fn topbar_control_widths(available_width: f32, item_spacing: f32) -> TopbarControlWidths {
-    let icon_width = TOPBAR_ICON_BUTTON_SIZE * 3.0;
+    let icon_width = TOPBAR_ICON_BUTTON_SIZE * TOPBAR_FILE_ACTION_COUNT;
     let fixed_spacing = item_spacing * 5.0;
     let combo_budget = (available_width - icon_width - fixed_spacing).max(0.0);
     let minimum_combo_width =
@@ -2553,12 +3048,12 @@ fn estimate_reader_line_height(
                 };
                 reader_row_height(heading_size)
             }
-            RenderKind::CodeBlock { is_last, .. } => estimate_code_block_line_height(
+            RenderKind::CodeBlock { is_first, .. } => estimate_code_block_line_height(
                 &line.text,
                 font_size,
                 available_width,
                 wrap,
-                is_last,
+                is_first,
             ),
             RenderKind::Rule
             | RenderKind::Quote
@@ -2584,8 +3079,8 @@ fn estimate_reader_line_height(
         RenderKind::Quote => {
             estimate_wrapped_text_height(&line.text, font_size, available_width - 28.0, 6.0)
         }
-        RenderKind::CodeBlock { is_last, .. } => {
-            estimate_code_block_line_height(&line.text, font_size, available_width, wrap, is_last)
+        RenderKind::CodeBlock { is_first, .. } => {
+            estimate_code_block_line_height(&line.text, font_size, available_width, wrap, is_first)
         }
         RenderKind::List | RenderKind::Paragraph | RenderKind::Table => {
             estimate_wrapped_text_height(&line.text, font_size, available_width, 6.0)
@@ -2615,21 +3110,28 @@ fn estimate_code_block_line_height(
     font_size: f32,
     available_width: f32,
     wrap: bool,
-    is_last: bool,
+    is_first: bool,
 ) -> f32 {
     let average_char_width = (font_size * 0.6).max(7.0);
-    let chars_per_visual_line = (available_width.max(120.0) / average_char_width)
-        .floor()
-        .max(8.0);
-    let visual_lines = if text.is_empty() || !wrap {
-        1.0
+    let text_width = (available_width - CODE_BLOCK_COPY_GUTTER_WIDTH).max(120.0);
+    let chars_per_visual_line = (text_width / average_char_width).floor().max(8.0);
+    let visual_lines: f32 = text
+        .split('\n')
+        .map(|line| {
+            if !wrap {
+                1.0
+            } else {
+                let character_count = line.chars().count().max(1) as f32;
+                (character_count / chars_per_visual_line).ceil().max(1.0)
+            }
+        })
+        .sum();
+    let text_height = visual_lines * (font_size + 7.0) + 14.0;
+    if is_first {
+        text_height.max(CODE_BLOCK_COPY_BUTTON_SIZE).ceil()
     } else {
-        let character_count = text.chars().count().max(1) as f32;
-        (character_count / chars_per_visual_line).ceil().max(1.0)
-    };
-    let copy_button_height = if is_last { 28.0 } else { 0.0 };
-
-    (visual_lines * (font_size + 7.0) + copy_button_height + 14.0).ceil()
+        text_height.ceil()
+    }
 }
 
 fn total_reader_height(heights: &[f32]) -> f32 {
@@ -2849,26 +3351,18 @@ mod tests {
     fn fenced_code_blocks_hide_fence_markers() {
         let lines = parse_markdown_lines("Before\n```text\nalpha\nbeta\n```\nAfter");
 
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].text, "Before");
         assert!(matches!(
             lines[1].kind,
             RenderKind::CodeBlock {
                 is_first: true,
-                is_last: false
-            }
-        ));
-        assert!(matches!(
-            lines[2].kind,
-            RenderKind::CodeBlock {
-                is_first: false,
                 is_last: true
             }
         ));
-        assert_eq!(lines[1].text, "alpha");
-        assert_eq!(lines[2].text, "beta");
-        assert_eq!(lines[2].copy_text.as_deref(), Some("alpha\nbeta"));
-        assert_eq!(lines[3].text, "After");
+        assert_eq!(lines[1].text, "alpha\nbeta");
+        assert_eq!(lines[1].copy_text.as_deref(), Some("alpha\nbeta"));
+        assert_eq!(lines[2].text, "After");
     }
 
     #[test]
@@ -2891,25 +3385,16 @@ mod tests {
     fn fenced_code_blocks_preserve_blank_lines() {
         let lines = parse_markdown_lines("```\n\nalpha\n\n```");
 
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 1);
         assert!(matches!(
             lines[0].kind,
             RenderKind::CodeBlock {
                 is_first: true,
-                is_last: false
-            }
-        ));
-        assert_eq!(lines[0].text, "");
-        assert_eq!(lines[1].text, "alpha");
-        assert!(matches!(
-            lines[2].kind,
-            RenderKind::CodeBlock {
-                is_first: false,
                 is_last: true
             }
         ));
-        assert_eq!(lines[2].text, "");
-        assert_eq!(lines[2].copy_text.as_deref(), Some("\nalpha\n"));
+        assert_eq!(lines[0].text, "\nalpha\n");
+        assert_eq!(lines[0].copy_text.as_deref(), Some("\nalpha\n"));
     }
 }
 
