@@ -9,6 +9,7 @@ Legend: `[x]` implemented in the Rust app, `[~]` partially implemented, `[ ]` st
 - [x] Open a folder with a folder picker.
 - [x] Accept a folder or Markdown file from command-line launch arguments.
 - [x] Browse Markdown files from a left-side folder tree.
+- [x] Add temporary left-side hierarchies by dropping files or folders into the sidebar or workspace.
 - [x] Lazily expand folder tree nodes to avoid loading large workspaces at startup.
 - [x] Refresh the folder tree with `F5`, after file operations, and when the app regains focus.
 - [x] Show the active root path, current file name, and full file path.

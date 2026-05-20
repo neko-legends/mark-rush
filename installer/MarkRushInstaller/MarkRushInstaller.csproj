@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>MarkRushInstaller</AssemblyName>
+    <RootNamespace>MarkRushInstaller</RootNamespace>
+    <ApplicationIcon>..\..\assets\icons\MarkRush.ico</ApplicationIcon>
+    <AssemblyInformationalVersion>$(MarkRushVersion)</AssemblyInformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(PayloadDir)' != ''">
+    <EmbeddedResource Include="$(PayloadDir)\*">
+      <LogicalName>Payload\%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

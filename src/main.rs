@@ -173,17 +173,22 @@ struct TreeEntry {
 
 impl TreeEntry {
     fn root(path: PathBuf) -> Self {
+        Self::from_path(path, true)
+    }
+
+    fn from_path(path: PathBuf, force_dir: bool) -> Self {
         let name = path
             .file_name()
             .and_then(|value| value.to_str())
             .map(str::to_owned)
             .unwrap_or_else(|| display_path(&path));
+        let is_dir = force_dir || path.is_dir();
 
         Self {
             path,
             name,
-            is_dir: true,
-            loaded: false,
+            is_dir,
+            loaded: !is_dir,
             children: Vec::new(),
         }
     }
@@ -291,6 +296,10 @@ struct CodeCopyFeedback {
     started: Instant,
 }
 
+struct TemporaryHierarchy {
+    root: TreeEntry,
+}
+
 #[derive(Clone)]
 enum PendingAction {
     OpenFile(PathBuf),
@@ -322,6 +331,7 @@ struct MarkRushApp {
     settings: AppSettings,
     settings_path: Option<PathBuf>,
     root: Option<TreeEntry>,
+    temporary_hierarchies: Vec<TemporaryHierarchy>,
     current_file: Option<PathBuf>,
     current_file_modified: Option<SystemTime>,
     document_text: String,
@@ -370,6 +380,7 @@ impl MarkRushApp {
             settings,
             settings_path,
             root: None,
+            temporary_hierarchies: Vec::new(),
             current_file: None,
             current_file_modified: None,
             document_text: String::new(),
@@ -461,6 +472,7 @@ impl MarkRushApp {
             egui::Rect::from_min_max(full_rect.min, egui::pos2(divider_x, full_rect.max.y));
         let workspace_rect =
             egui::Rect::from_min_max(egui::pos2(divider_x + 1.0, full_rect.min.y), full_rect.max);
+        self.handle_drops(ui.ctx(), sidebar_rect, workspace_rect);
 
         ui.painter().line_segment(
             [
@@ -549,6 +561,8 @@ impl MarkRushApp {
 
                     ui.add_space(8.0);
 
+                    let mut pending_action = None;
+                    let mut close_temporary_index = None;
                     let tree_output = egui::ScrollArea::vertical()
                         .id_salt("sidebar-tree-scroll")
                         .auto_shrink([false, false])
@@ -558,16 +572,55 @@ impl MarkRushApp {
                                 if let Some(action) =
                                     show_tree(ui, root, self.current_file.as_deref(), &theme)
                                 {
-                                    self.handle_tree_action(ui.ctx(), action);
+                                    pending_action = Some(action);
                                 }
-                            } else {
+                            } else if self.temporary_hierarchies.is_empty() {
                                 ui.label(
                                     egui::RichText::new("Open a folder to browse Markdown files.")
                                         .color(theme.muted),
                                 );
                             }
+
+                            for (index, hierarchy) in
+                                self.temporary_hierarchies.iter_mut().enumerate()
+                            {
+                                ui.add_space(10.0);
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    if egui::Button::new("Close")
+                                        .fill(theme.button)
+                                        .ui(ui)
+                                        .clicked()
+                                    {
+                                        close_temporary_index = Some(index);
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(display_path(&hierarchy.root.path))
+                                                .color(theme.muted)
+                                                .size(12.0),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+
+                                if let Some(action) = show_tree(
+                                    ui,
+                                    &mut hierarchy.root,
+                                    self.current_file.as_deref(),
+                                    &theme,
+                                ) {
+                                    pending_action = Some(action);
+                                }
+                            }
                         });
                     self.apply_middle_mouse_scroll(ui, &tree_output, false, true);
+                    if let Some(index) = close_temporary_index {
+                        self.close_temporary_hierarchy(index);
+                    }
+                    if let Some(action) = pending_action {
+                        self.handle_tree_action(ui.ctx(), action);
+                    }
                 });
             },
         );
@@ -1445,6 +1498,94 @@ impl MarkRushApp {
         }
     }
 
+    fn handle_drops(
+        &mut self,
+        ctx: &egui::Context,
+        sidebar_rect: egui::Rect,
+        workspace_rect: egui::Rect,
+    ) {
+        let (dropped_paths, dropped_in_workspace) = ctx.input(|input| {
+            let dropped_paths = input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect::<Vec<_>>();
+            let Some(pointer_pos) = input.pointer.hover_pos() else {
+                return (dropped_paths, false);
+            };
+            let accepted_drop_zone =
+                sidebar_rect.contains(pointer_pos) || workspace_rect.contains(pointer_pos);
+            let dropped_in_workspace =
+                workspace_rect.contains(pointer_pos) && !sidebar_rect.contains(pointer_pos);
+
+            (
+                accepted_drop_zone
+                    .then_some(dropped_paths)
+                    .unwrap_or_default(),
+                dropped_in_workspace,
+            )
+        });
+
+        if dropped_paths.is_empty() {
+            return;
+        }
+
+        let mut added = 0;
+        let mut file_to_open = None;
+        for path in dropped_paths {
+            if dropped_in_workspace && file_to_open.is_none() && is_markdown_file(&path) {
+                file_to_open = Some(path.clone());
+            }
+            if self.add_temporary_hierarchy(path) {
+                added += 1;
+            }
+        }
+
+        if let Some(path) = file_to_open {
+            self.request_open_file(path);
+            if added > 1 {
+                self.set_status(format!(
+                    "Added {added} temporary hierarchies and opened file"
+                ));
+            } else {
+                self.set_status("Added temporary hierarchy and opened file");
+            }
+        } else if added == 1 {
+            self.set_status("Added temporary hierarchy");
+        } else if added > 1 {
+            self.set_status(format!("Added {added} temporary hierarchies"));
+        }
+    }
+
+    fn add_temporary_hierarchy(&mut self, path: PathBuf) -> bool {
+        let path = absolute_path(&path);
+        if !path.is_dir() && !path.is_file() {
+            return false;
+        }
+        if self
+            .temporary_hierarchies
+            .iter()
+            .any(|hierarchy| hierarchy.root.path == path)
+        {
+            return false;
+        }
+
+        self.known_roots.insert(path.clone());
+        self.temporary_hierarchies.push(TemporaryHierarchy {
+            root: TreeEntry::from_path(path, false),
+        });
+        true
+    }
+
+    fn close_temporary_hierarchy(&mut self, index: usize) {
+        if index < self.temporary_hierarchies.len() {
+            let hierarchy = self.temporary_hierarchies.remove(index);
+            self.known_roots.remove(&hierarchy.root.path);
+            self.set_status("Closed temporary hierarchy");
+        }
+    }
+
     fn open_folder_dialog(&mut self) {
         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
             self.request_action(PendingAction::SetRoot(folder));
@@ -1562,6 +1703,14 @@ impl MarkRushApp {
             self.refresh_tree();
         }
 
+        for hierarchy in &mut self.temporary_hierarchies {
+            if hierarchy.root.path == source {
+                hierarchy.root = TreeEntry::from_path(target.to_path_buf(), false);
+            } else if let Ok(relative) = hierarchy.root.path.strip_prefix(source) {
+                hierarchy.root = TreeEntry::from_path(target.join(relative), false);
+            }
+        }
+
         self.save_settings();
     }
 
@@ -1650,12 +1799,17 @@ impl MarkRushApp {
     }
 
     fn refresh_tree_silent(&mut self) -> bool {
+        let mut refreshed = false;
         if let Some(root) = self.root.as_ref().map(|entry| entry.path.clone()) {
             self.root = Some(TreeEntry::root(root));
-            true
-        } else {
-            false
+            refreshed = true;
         }
+        for hierarchy in &mut self.temporary_hierarchies {
+            let path = hierarchy.root.path.clone();
+            hierarchy.root = TreeEntry::from_path(path, false);
+            refreshed = true;
+        }
+        refreshed
     }
 
     fn reload_current_file_if_changed_on_disk(&mut self) {
