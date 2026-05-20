@@ -31,9 +31,9 @@ The app is written in Rust with egui/eframe and is intended to run on Windows, m
 
 ## Download
 
-Windows releases include a portable ZIP and an optional user-level installer.
+Windows releases include a portable executable and an optional user-level installer.
 
-- Portable ZIP: unzip the package and run `markrush.exe`; no install step is required.
+- Portable EXE: download and run the executable directly; no install step is required.
 - Installer: installs to `%LOCALAPPDATA%\Programs\MarkRush`, creates a Start Menu shortcut, and registers an uninstall entry for the current user.
 
 ## Build From Source
@@ -64,9 +64,9 @@ On Windows, the direct release executable is:
 .\target\release\markrush.exe
 ```
 
-## Windows Portable Package
+## Windows Portable Executable
 
-To create a Windows portable ZIP with a SHA256 checksum:
+To create a Windows portable executable with a SHA256 checksum:
 
 ```powershell
 .\Build-Windows.ps1
@@ -78,7 +78,7 @@ The package is written to:
 dist/
 ```
 
-The Windows release binary embeds the app icon, generated version metadata, and uses the Windows GUI subsystem so double-clicking `markrush.exe` does not open a blank console.
+The Windows release binary embeds the app icon, generated version metadata, and uses the Windows GUI subsystem so double-clicking it does not open a blank console.
 
 If Windows resource embedding fails, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.
 
