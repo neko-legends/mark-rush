@@ -13,11 +13,56 @@ if (-not (Test-Path -LiteralPath $Cargo)) {
     throw "Cargo was not found. Install Rust or add cargo to PATH."
 }
 
-$DotnetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
-if (-not $DotnetCommand) {
-    throw ".NET SDK was not found. Install the .NET SDK to build the installer."
+function Get-MakeNsis {
+    $Command = Get-Command makensis.exe -ErrorAction SilentlyContinue
+    if ($Command) {
+        return $Command.Source
+    }
+
+    foreach ($Candidate in @(
+        (Join-Path $env:ProgramFiles 'NSIS\makensis.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'),
+        (Join-Path $PSScriptRoot 'target\nsis\nsis-3.11\makensis.exe')
+    )) {
+        if ($Candidate -and (Test-Path -LiteralPath $Candidate)) {
+            return $Candidate
+        }
+    }
+
+    $NsisRoot = Join-Path $PSScriptRoot 'target\nsis'
+    $NsisZip = Join-Path $NsisRoot 'nsis-3.11.zip'
+    $NsisUrl = 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11.zip'
+
+    New-Item -ItemType Directory -Force -Path $NsisRoot | Out-Null
+    $NeedsDownload = $true
+    if (Test-Path -LiteralPath $NsisZip) {
+        $ExistingZip = Get-Item -LiteralPath $NsisZip
+        $NeedsDownload = $ExistingZip.Length -lt 1MB
+    }
+    if ($NeedsDownload) {
+        Remove-Item -LiteralPath $NsisZip -Force -ErrorAction SilentlyContinue
+        Write-Host "Downloading portable NSIS 3.11..."
+        $Curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        if ($Curl) {
+            & $Curl.Source -L -o $NsisZip $NsisUrl
+            if ($LASTEXITCODE -ne 0) {
+                throw "curl failed to download NSIS with exit code $LASTEXITCODE"
+            }
+        } else {
+            Invoke-WebRequest -Uri $NsisUrl -OutFile $NsisZip -MaximumRedirection 10
+        }
+    }
+
+    Expand-Archive -LiteralPath $NsisZip -DestinationPath $NsisRoot -Force
+    $DownloadedMakeNsis = Join-Path $NsisRoot 'nsis-3.11\makensis.exe'
+    if (-not (Test-Path -LiteralPath $DownloadedMakeNsis)) {
+        throw "makensis.exe was not found after downloading NSIS."
+    }
+
+    return $DownloadedMakeNsis
 }
-$Dotnet = $DotnetCommand.Source
+
+$MakeNsis = Get-MakeNsis
 
 $env:MARKRUSH_BUILD_STAMP = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
 
@@ -40,14 +85,17 @@ $DistDir = Join-Path $Root 'dist'
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 $PackageVersion = $Version -replace '\+', '-'
+$NumericVersion = if ($Version -match '^v?(\d+)\.(\d+)\.(\d+)') {
+    "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
+} else {
+    '0.0.0.0'
+}
 $PackageName = "MarkRush-$PackageVersion-windows-x64-setup"
 $StageDir = Join-Path ([System.IO.Path]::GetTempPath()) "$PackageName-payload-$([Guid]::NewGuid().ToString('N'))"
-$PublishDir = Join-Path ([System.IO.Path]::GetTempPath()) "$PackageName-publish-$([Guid]::NewGuid().ToString('N'))"
 $PackagePath = Join-Path $DistDir "$PackageName.exe"
 
 try {
     New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
-    New-Item -ItemType Directory -Force -Path $PublishDir | Out-Null
 
     Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir 'markrush.exe')
     Copy-Item -LiteralPath (Join-Path $Root 'README.md') -Destination $StageDir
@@ -63,37 +111,29 @@ try {
         Remove-Item -LiteralPath $PackagePath -Force
     }
 
-    $InstallerProject = Join-Path $Root 'installer\MarkRushInstaller\MarkRushInstaller.csproj'
-    & $Dotnet publish $InstallerProject `
-        --configuration Release `
-        --runtime win-x64 `
-        --self-contained true `
-        --output $PublishDir `
-        -p:PayloadDir="$StageDir" `
-        -p:MarkRushVersion="$Version" `
-        -p:PublishSingleFile=true `
-        -p:EnableCompressionInSingleFile=true
+    $InstallerScript = Join-Path $Root 'installer\MarkRush.nsi'
+    & $MakeNsis `
+        "/DAPP_VERSION=$Version" `
+        "/DAPP_NUMERIC_VERSION=$NumericVersion" `
+        "/DOUT_FILE=$PackagePath" `
+        "/DPAYLOAD_DIR=$StageDir" `
+        $InstallerScript
     if ($LASTEXITCODE -ne 0) {
-        throw "dotnet publish failed with exit code $LASTEXITCODE"
+        throw "makensis failed with exit code $LASTEXITCODE"
     }
-
-    $InstallerExe = Join-Path $PublishDir 'MarkRushInstaller.exe'
-    if (-not (Test-Path -LiteralPath $InstallerExe)) {
-        throw "Expected installer executable was not produced: $InstallerExe"
-    }
-
-    Copy-Item -LiteralPath $InstallerExe -Destination $PackagePath -Force
 }
 finally {
-    foreach ($Path in @($StageDir, $PublishDir)) {
-        if (Test-Path -LiteralPath $Path) {
-            $ResolvedPath = (Resolve-Path -LiteralPath $Path).Path
-            $TempRoot = [System.IO.Path]::GetTempPath()
-            if ($ResolvedPath.StartsWith($TempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-                Remove-Item -LiteralPath $ResolvedPath -Recurse -Force
-            }
+    if (Test-Path -LiteralPath $StageDir) {
+        $ResolvedStage = (Resolve-Path -LiteralPath $StageDir).Path
+        $TempRoot = [System.IO.Path]::GetTempPath()
+        if ($ResolvedStage.StartsWith($TempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $ResolvedStage -Recurse -Force
         }
     }
+}
+
+if (-not (Test-Path -LiteralPath $PackagePath)) {
+    throw "Expected installer was not produced: $PackagePath"
 }
 
 $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PackagePath).Hash

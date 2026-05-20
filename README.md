@@ -90,7 +90,7 @@ To create a Windows setup executable with a SHA256 checksum:
 .\Build-Windows-Installer.ps1
 ```
 
-The installer build requires the .NET SDK. The generated installer installs for the current user and does not require admin rights.
+The installer build uses NSIS. If `makensis.exe` is not installed, the build script downloads a portable NSIS copy under `target/nsis`. The generated installer installs for the current user and does not require admin rights.
 
 ## Versioning
 
