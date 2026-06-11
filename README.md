@@ -76,10 +76,10 @@ To create a Windows portable executable with a SHA256 checksum:
 The package is written to:
 
 ```text
-dist/
+release/portable/
 ```
 
-The Windows release binary embeds the app icon, generated version metadata, and uses the Windows GUI subsystem so double-clicking it does not open a blank console.
+The Windows portable folder contains `markrush.exe` and a matching SHA256 checksum. The release binary embeds the app icon, generated version metadata, and uses the Windows GUI subsystem so double-clicking it does not open a blank console.
 
 If Windows resource embedding fails, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.
 
@@ -92,6 +92,12 @@ To create a Windows setup executable with a SHA256 checksum:
 ```
 
 The installer build uses NSIS. If `makensis.exe` is not installed, the build script downloads a portable NSIS copy under `target/nsis`. The generated installer installs for the current user and does not require admin rights.
+
+The installer package is written to:
+
+```text
+release/installer/
+```
 
 ## Versioning
 

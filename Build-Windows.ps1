@@ -30,16 +30,14 @@ if (-not $Version) {
     $Version = 'dev'
 }
 
-$PackageVersion = $Version -replace '\+', '-'
-$DistDir = Join-Path $Root 'dist'
-New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-
-$PackageName = "MarkRush-$PackageVersion-windows-x64-portable"
-$PackagePath = Join-Path $DistDir "$PackageName.exe"
-
-if (Test-Path -LiteralPath $PackagePath) {
-    Remove-Item -LiteralPath $PackagePath -Force
+$ReleaseRoot = Join-Path $Root 'release'
+$PortableDir = Join-Path $ReleaseRoot 'portable'
+if (Test-Path -LiteralPath $PortableDir) {
+    Remove-Item -LiteralPath $PortableDir -Recurse -Force
 }
+New-Item -ItemType Directory -Force -Path $PortableDir | Out-Null
+
+$PackagePath = Join-Path $PortableDir 'markrush.exe'
 Copy-Item -LiteralPath $ExePath -Destination $PackagePath -Force
 
 $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PackagePath).Hash

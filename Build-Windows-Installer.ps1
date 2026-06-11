@@ -81,8 +81,12 @@ if (-not $Version) {
     $Version = 'dev'
 }
 
-$DistDir = Join-Path $Root 'dist'
-New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
+$ReleaseRoot = Join-Path $Root 'release'
+$InstallerDir = Join-Path $ReleaseRoot 'installer'
+if (Test-Path -LiteralPath $InstallerDir) {
+    Remove-Item -LiteralPath $InstallerDir -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $InstallerDir | Out-Null
 
 $PackageVersion = $Version -replace '\+', '-'
 $NumericVersion = if ($Version -match '^v?(\d+)\.(\d+)\.(\d+)') {
@@ -92,7 +96,7 @@ $NumericVersion = if ($Version -match '^v?(\d+)\.(\d+)\.(\d+)') {
 }
 $PackageName = "MarkRush-$PackageVersion-windows-x64-setup"
 $StageDir = Join-Path ([System.IO.Path]::GetTempPath()) "$PackageName-payload-$([Guid]::NewGuid().ToString('N'))"
-$PackagePath = Join-Path $DistDir "$PackageName.exe"
+$PackagePath = Join-Path $InstallerDir 'MarkRush-Setup.exe'
 
 try {
     New-Item -ItemType Directory -Force -Path $StageDir | Out-Null

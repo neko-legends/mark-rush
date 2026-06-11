@@ -20,6 +20,7 @@ TestResults/
 # Rust build outputs
 target/
 dist/
+release/
 
 # Logs and local runtime state
 *.log
