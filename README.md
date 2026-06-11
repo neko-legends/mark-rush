@@ -17,6 +17,7 @@ The app is written in Rust with egui/eframe and is intended to run on Windows, m
 - Render large Markdown files as virtualized rows for responsive scrolling.
 - Switch between rendered read mode and raw Markdown edit mode.
 - Save with the Save button or `Ctrl+S`.
+- Print with the Print button or `Ctrl+P`.
 - Prompt before discarding unsaved edits.
 - Search with `Ctrl+F`, `Enter`, `Shift+Enter`, `F3`, and `Shift+F3`.
 - Follow local file links, folder links, heading anchors, and external URLs.
