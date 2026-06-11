@@ -45,6 +45,8 @@ const READER_HORIZONTAL_PADDING: f32 = 36.0;
 const READER_MIN_OVERSCAN: f32 = 900.0;
 const READER_OVERSCAN_VIEWPORTS: f32 = 1.5;
 const READER_MAX_OVERSCAN: f32 = 6_000.0;
+const PRINT_PREVIEW_CHARS_PER_LINE: usize = 88;
+const PRINT_PREVIEW_LINES_PER_PAGE: usize = 54;
 
 fn main() -> eframe::Result {
     install_panic_hook();
@@ -357,6 +359,7 @@ struct MarkRushApp {
     new_file_name: String,
     rename_target: Option<PathBuf>,
     rename_name: String,
+    print_preview: Option<PrintDocument>,
 }
 
 impl MarkRushApp {
@@ -406,6 +409,7 @@ impl MarkRushApp {
             new_file_name: "untitled.md".to_owned(),
             rename_target: None,
             rename_name: String::new(),
+            print_preview: None,
         };
 
         app.apply_startup_target();
@@ -504,6 +508,9 @@ impl MarkRushApp {
         }
         if self.rename_target.is_some() {
             self.draw_rename_prompt(ui.ctx());
+        }
+        if self.print_preview.is_some() {
+            self.draw_print_preview(ui.ctx());
         }
     }
 
@@ -869,8 +876,10 @@ impl MarkRushApp {
             self.save_current_file();
         }
 
-        if toolbar_icon_button(ui, "🖨", "Print", self.current_file.is_some(), theme).clicked() {
-            self.print_current_document();
+        if toolbar_icon_button(ui, "🖨", "Print preview", self.current_file.is_some(), theme)
+            .clicked()
+        {
+            self.open_print_preview();
         }
 
         if toolbar_icon_button(
@@ -1448,6 +1457,107 @@ impl MarkRushApp {
             });
     }
 
+    fn draw_print_preview(&mut self, ctx: &egui::Context) {
+        let theme = self.theme().clone();
+        let mut should_print = false;
+        let mut should_close = false;
+
+        {
+            let Some(preview) = self.print_preview.as_ref() else {
+                return;
+            };
+            let page_count = preview.pages.len();
+
+            egui::Window::new("Print preview")
+                .collapsible(false)
+                .resizable(true)
+                .default_size(egui::vec2(760.0, 620.0))
+                .min_size(egui::vec2(520.0, 420.0))
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&preview.title)
+                                    .strong()
+                                    .color(theme.text),
+                            )
+                            .truncate(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{page_count} page(s)"))
+                                    .color(theme.muted),
+                            );
+                        });
+                    });
+
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("print-preview-pages")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (index, page) in preview.pages.iter().enumerate() {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Page {} of {page_count}",
+                                        index + 1
+                                    ))
+                                    .color(theme.muted)
+                                    .size(12.0),
+                                );
+                                egui::Frame::new()
+                                    .fill(egui::Color32::WHITE)
+                                    .stroke(egui::Stroke::new(1.0, theme.border))
+                                    .inner_margin(egui::Margin::symmetric(22, 24))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(610.0);
+                                        ui.set_min_height(790.0);
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        for line in &page.lines {
+                                            let visible_line =
+                                                if line.is_empty() { " " } else { line };
+                                            ui.label(
+                                                egui::RichText::new(visible_line)
+                                                    .monospace()
+                                                    .size(11.0)
+                                                    .color(egui::Color32::BLACK),
+                                            );
+                                        }
+                                    });
+                                ui.add_space(14.0);
+                            }
+                        });
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if egui::Button::new("Print")
+                            .fill(theme.button)
+                            .ui(ui)
+                            .clicked()
+                        {
+                            should_print = true;
+                        }
+
+                        if egui::Button::new("Close")
+                            .fill(theme.button)
+                            .ui(ui)
+                            .clicked()
+                        {
+                            should_close = true;
+                        }
+                    });
+                });
+        }
+
+        if should_print {
+            self.print_preview_document();
+        }
+        if should_close {
+            self.print_preview = None;
+        }
+    }
+
     fn handle_shortcuts(&mut self, ui: &mut egui::Ui) {
         ui.input(|input| {
             if input.key_pressed(egui::Key::S) && input.modifiers.command {
@@ -1455,7 +1565,7 @@ impl MarkRushApp {
             }
 
             if input.key_pressed(egui::Key::P) && input.modifiers.command {
-                self.print_current_document();
+                self.open_print_preview();
             }
 
             if self.current_file.is_some()
@@ -1910,7 +2020,7 @@ impl MarkRushApp {
         }
     }
 
-    fn print_current_document(&mut self) {
+    fn open_print_preview(&mut self) {
         let Some(path) = self.current_file.as_ref() else {
             self.set_status("Select a file before printing");
             return;
@@ -1921,7 +2031,19 @@ impl MarkRushApp {
             .and_then(|name| name.to_str())
             .unwrap_or("MarkRush document");
 
-        match print_text_document(title, &self.document_text) {
+        let document = build_print_document(title, &self.document_text);
+        let page_count = document.pages.len();
+        self.print_preview = Some(document);
+        self.set_status(format!("Prepared print preview ({page_count} page(s))"));
+    }
+
+    fn print_preview_document(&mut self) {
+        let Some(document) = self.print_preview.as_ref() else {
+            self.set_status("Open print preview before printing");
+            return;
+        };
+
+        match print_document(document) {
             Ok(PrintOutcome::Printed) => self.set_status("Sent document to printer"),
             Ok(PrintOutcome::Cancelled) => self.set_status("Print cancelled"),
             Err(error) => self.set_status(format!("Print failed: {error}")),
@@ -2915,27 +3037,111 @@ enum PrintOutcome {
     Cancelled,
 }
 
+#[derive(Clone)]
+struct PrintDocument {
+    title: String,
+    pages: Vec<PrintPage>,
+}
+
+#[derive(Clone)]
+struct PrintPage {
+    lines: Vec<String>,
+}
+
+fn build_print_document(title: &str, text: &str) -> PrintDocument {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines = Vec::new();
+
+    if normalized.is_empty() {
+        lines.push(String::new());
+    } else {
+        for source_line in normalized.split('\n') {
+            lines.extend(wrap_print_preview_line(
+                source_line,
+                PRINT_PREVIEW_CHARS_PER_LINE,
+            ));
+        }
+    }
+
+    let mut pages: Vec<PrintPage> = lines
+        .chunks(PRINT_PREVIEW_LINES_PER_PAGE)
+        .map(|chunk| PrintPage {
+            lines: chunk.to_vec(),
+        })
+        .collect();
+    if pages.is_empty() {
+        pages.push(PrintPage {
+            lines: vec![String::new()],
+        });
+    }
+
+    PrintDocument {
+        title: title.to_owned(),
+        pages,
+    }
+}
+
+fn wrap_print_preview_line(line: &str, max_chars: usize) -> Vec<String> {
+    let mut pending = line.replace('\t', "    ");
+    if pending.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut wrapped = Vec::new();
+    while pending.chars().count() > max_chars {
+        let limit = byte_index_after_chars(&pending, max_chars);
+        let candidate = &pending[..limit];
+        let split = candidate
+            .char_indices()
+            .rev()
+            .find(|(index, character)| *index > 0 && character.is_whitespace())
+            .map(|(index, _)| index)
+            .unwrap_or(limit);
+        let (head, tail) = pending.split_at(split);
+        wrapped.push(head.trim_end().to_owned());
+        pending = tail.trim_start().to_owned();
+
+        if pending.is_empty() {
+            break;
+        }
+    }
+
+    if !pending.is_empty() {
+        wrapped.push(pending);
+    }
+
+    wrapped
+}
+
+fn byte_index_after_chars(value: &str, max_chars: usize) -> usize {
+    value
+        .char_indices()
+        .nth(max_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
+}
+
 #[cfg(target_os = "windows")]
-fn print_text_document(title: &str, text: &str) -> Result<PrintOutcome, String> {
-    windows_print::print_text_document(title, text)
+fn print_document(document: &PrintDocument) -> Result<PrintOutcome, String> {
+    windows_print::print_document(document)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn print_text_document(_title: &str, _text: &str) -> Result<PrintOutcome, String> {
+fn print_document(_document: &PrintDocument) -> Result<PrintOutcome, String> {
     Err("Printing is currently available in the Windows build".to_owned())
 }
 
 #[cfg(target_os = "windows")]
 mod windows_print {
-    use super::PrintOutcome;
+    use super::{PrintDocument, PrintOutcome};
     use std::mem;
 
-    use windows_sys::Win32::Foundation::{GlobalFree, SIZE};
+    use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::Graphics::Gdi::{
         CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteDC, DeleteObject,
-        FF_SWISS, FW_NORMAL, GetDeviceCaps, GetTextExtentPoint32W, GetTextMetricsW, HORZRES,
-        LOGPIXELSX, LOGPIXELSY, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor,
-        TEXTMETRICW, TRANSPARENT, TextOutW, VARIABLE_PITCH, VERTRES,
+        FF_MODERN, FIXED_PITCH, FW_NORMAL, GetDeviceCaps, GetTextMetricsW, HORZRES, LOGPIXELSX,
+        LOGPIXELSY, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW,
+        TRANSPARENT, TextOutW, VERTRES,
     };
     use windows_sys::Win32::Storage::Xps::{
         AbortDoc, DOCINFOW, EndDoc, EndPage, StartDocW, StartPage,
@@ -2948,12 +3154,11 @@ mod windows_print {
     struct PrintLayout {
         left: i32,
         top: i32,
-        right: i32,
         bottom: i32,
         line_height: i32,
     }
 
-    pub fn print_text_document(title: &str, text: &str) -> Result<PrintOutcome, String> {
+    pub fn print_document(document: &PrintDocument) -> Result<PrintOutcome, String> {
         let mut dialog = PRINTDLGW::default();
         dialog.lStructSize = mem::size_of::<PRINTDLGW>() as u32;
         dialog.Flags = PD_RETURNDC
@@ -2980,7 +3185,7 @@ mod windows_print {
             return Err("No printer was selected".to_owned());
         }
 
-        let result = print_to_device(dialog.hDC, title, text).map(|()| PrintOutcome::Printed);
+        let result = print_to_device(dialog.hDC, document).map(|()| PrintOutcome::Printed);
 
         unsafe {
             DeleteDC(dialog.hDC);
@@ -2992,12 +3197,11 @@ mod windows_print {
 
     fn print_to_device(
         hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-        title: &str,
-        text: &str,
+        document: &PrintDocument,
     ) -> Result<(), String> {
-        let font_name = wide_null("Segoe UI");
+        let font_name = wide_null("Consolas");
         let dpi_y = device_cap(hdc, LOGPIXELSY, 96);
-        let font_height = -((11 * dpi_y + 36) / 72).max(1);
+        let font_height = -((10 * dpi_y + 36) / 72).max(1);
         let font = unsafe {
             CreateFontW(
                 font_height,
@@ -3012,7 +3216,7 @@ mod windows_print {
                 OUT_DEFAULT_PRECIS as u32,
                 CLIP_DEFAULT_PRECIS as u32,
                 DEFAULT_QUALITY as u32,
-                (VARIABLE_PITCH | FF_SWISS) as u32,
+                (FIXED_PITCH | FF_MODERN) as u32,
                 font_name.as_ptr(),
             )
         };
@@ -3026,7 +3230,7 @@ mod windows_print {
             SetTextColor(hdc, 0);
         }
 
-        let result = print_with_selected_font(hdc, title, text);
+        let result = print_with_selected_font(hdc, document);
 
         unsafe {
             if !previous_font.is_null() {
@@ -3040,16 +3244,11 @@ mod windows_print {
 
     fn print_with_selected_font(
         hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-        title: &str,
-        text: &str,
+        document: &PrintDocument,
     ) -> Result<(), String> {
         let layout = print_layout(hdc);
-        let page_width = (layout.right - layout.left).max(1);
-        let page_height = (layout.bottom - layout.top).max(layout.line_height);
-        let lines_per_page = (page_height / layout.line_height).max(1) as usize;
-        let lines = wrap_text_for_print(hdc, text, page_width);
 
-        let title_wide = wide_null(title);
+        let title_wide = wide_null(&document.title);
         let doc_info = DOCINFOW {
             cbSize: mem::size_of::<DOCINFOW>() as i32,
             lpszDocName: title_wide.as_ptr(),
@@ -3062,7 +3261,7 @@ mod windows_print {
             return Err("Could not start the print job".to_owned());
         }
 
-        let result = print_pages(hdc, &layout, lines_per_page, &lines);
+        let result = print_pages(hdc, &layout, document);
         match result {
             Ok(()) => {
                 if unsafe { EndDoc(hdc) } <= 0 {
@@ -3083,18 +3282,18 @@ mod windows_print {
     fn print_pages(
         hdc: windows_sys::Win32::Graphics::Gdi::HDC,
         layout: &PrintLayout,
-        lines_per_page: usize,
-        lines: &[String],
+        document: &PrintDocument,
     ) -> Result<(), String> {
-        let mut index = 0;
-        loop {
+        for page in &document.pages {
             if unsafe { StartPage(hdc) } <= 0 {
                 return Err("Could not start a printer page".to_owned());
             }
 
             let mut y = layout.top;
-            let page_end = (index + lines_per_page).min(lines.len());
-            for line in &lines[index..page_end] {
+            for line in &page.lines {
+                if y + layout.line_height > layout.bottom {
+                    break;
+                }
                 print_line(hdc, layout.left, y, line)?;
                 y += layout.line_height;
             }
@@ -3102,11 +3301,6 @@ mod windows_print {
             if unsafe { EndPage(hdc) } <= 0 {
                 return Err("Could not finish a printer page".to_owned());
             }
-
-            if lines.is_empty() || page_end >= lines.len() {
-                break;
-            }
-            index = page_end;
         }
 
         Ok(())
@@ -3143,7 +3337,6 @@ mod windows_print {
         PrintLayout {
             left: margin_x,
             top: margin_y,
-            right: (page_width - margin_x).max(margin_x + 1),
             bottom: (page_height - margin_y).max(margin_y + line_height),
             line_height,
         }
@@ -3155,146 +3348,6 @@ mod windows_print {
             (metrics.tmHeight + metrics.tmExternalLeading + (dpi_y / 18).max(2)).max(1)
         } else {
             ((11 * dpi_y + 36) / 72 + (dpi_y / 18).max(2)).max(1)
-        }
-    }
-
-    fn wrap_text_for_print(
-        hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-        text: &str,
-        max_width: i32,
-    ) -> Vec<String> {
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        let mut lines = Vec::new();
-
-        if normalized.is_empty() {
-            lines.push(String::new());
-            return lines;
-        }
-
-        for raw_line in normalized.split('\n') {
-            wrap_source_line(hdc, raw_line, max_width, &mut lines);
-        }
-
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines
-    }
-
-    fn wrap_source_line(
-        hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-        raw_line: &str,
-        max_width: i32,
-        output: &mut Vec<String>,
-    ) {
-        let line = raw_line.replace('\t', "    ");
-        if line.is_empty() {
-            output.push(String::new());
-            return;
-        }
-
-        let mut current = String::new();
-        for token in print_tokens(&line) {
-            let candidate = format!("{current}{token}");
-            if text_width(hdc, &candidate) <= max_width {
-                current = candidate;
-                continue;
-            }
-
-            if current.is_empty() {
-                split_long_token(hdc, token.trim_start(), max_width, output, &mut current);
-                continue;
-            }
-
-            output.push(current.trim_end().to_owned());
-            current.clear();
-
-            let token = token.trim_start();
-            if token.is_empty() {
-                continue;
-            }
-
-            if text_width(hdc, token) <= max_width {
-                current.push_str(token);
-            } else {
-                split_long_token(hdc, token, max_width, output, &mut current);
-            }
-        }
-
-        if current.is_empty() {
-            output.push(String::new());
-        } else {
-            output.push(current.trim_end().to_owned());
-        }
-    }
-
-    fn split_long_token(
-        hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-        token: &str,
-        max_width: i32,
-        output: &mut Vec<String>,
-        current: &mut String,
-    ) {
-        let mut chunk = String::new();
-        for character in token.chars() {
-            let mut candidate = chunk.clone();
-            candidate.push(character);
-
-            if !chunk.is_empty() && text_width(hdc, &candidate) > max_width {
-                output.push(chunk);
-                chunk = character.to_string();
-            } else {
-                chunk = candidate;
-            }
-        }
-        *current = chunk;
-    }
-
-    fn print_tokens(line: &str) -> Vec<String> {
-        let mut tokens = Vec::new();
-        let mut current = String::new();
-        let mut current_is_whitespace = None;
-
-        for character in line.chars() {
-            let is_whitespace = character.is_whitespace();
-            if current_is_whitespace == Some(is_whitespace) {
-                current.push(character);
-                continue;
-            }
-
-            if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
-            }
-            current.push(character);
-            current_is_whitespace = Some(is_whitespace);
-        }
-
-        if !current.is_empty() {
-            tokens.push(current);
-        }
-
-        tokens
-    }
-
-    fn text_width(hdc: windows_sys::Win32::Graphics::Gdi::HDC, text: &str) -> i32 {
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        if wide.is_empty() {
-            return 0;
-        }
-
-        let mut size = SIZE::default();
-        if unsafe {
-            GetTextExtentPoint32W(
-                hdc,
-                wide.as_ptr(),
-                wide.len().min(i32::MAX as usize) as i32,
-                &mut size,
-            )
-        } == 0
-        {
-            wide.len() as i32 * 8
-        } else {
-            size.cx
         }
     }
 
@@ -3994,6 +4047,33 @@ mod tests {
         ));
         assert_eq!(lines[0].text, "\nalpha\n");
         assert_eq!(lines[0].copy_text.as_deref(), Some("\nalpha\n"));
+    }
+
+    #[test]
+    fn print_preview_wraps_long_lines() {
+        let line = "x".repeat(PRINT_PREVIEW_CHARS_PER_LINE + 8);
+        let document = build_print_document("sample.md", &line);
+
+        assert_eq!(document.pages.len(), 1);
+        assert_eq!(document.pages[0].lines.len(), 2);
+        assert_eq!(
+            document.pages[0].lines[0].chars().count(),
+            PRINT_PREVIEW_CHARS_PER_LINE
+        );
+        assert_eq!(document.pages[0].lines[1].chars().count(), 8);
+    }
+
+    #[test]
+    fn print_preview_splits_pages() {
+        let text = (0..(PRINT_PREVIEW_LINES_PER_PAGE + 1))
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let document = build_print_document("sample.md", &text);
+
+        assert_eq!(document.pages.len(), 2);
+        assert_eq!(document.pages[0].lines.len(), PRINT_PREVIEW_LINES_PER_PAGE);
+        assert_eq!(document.pages[1].lines.len(), 1);
     }
 }
 
