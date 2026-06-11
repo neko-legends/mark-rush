@@ -1,3 +1,7 @@
+param(
+    [string]$BuildStamp = '20260610000000'
+)
+
 $ErrorActionPreference = 'Stop'
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -64,7 +68,10 @@ function Get-MakeNsis {
 
 $MakeNsis = Get-MakeNsis
 
-$env:MARKRUSH_BUILD_STAMP = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
+if ($BuildStamp -notmatch '^\d{14}$') {
+    throw "BuildStamp must use yyyyMMddHHmmss format."
+}
+$env:MARKRUSH_BUILD_STAMP = $BuildStamp
 
 & $Cargo build --release
 if ($LASTEXITCODE -ne 0) {

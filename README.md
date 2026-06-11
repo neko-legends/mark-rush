@@ -73,6 +73,8 @@ To create a Windows portable executable with a SHA256 checksum:
 .\Build-Windows.ps1
 ```
 
+The script defaults to the `v26.6.10` release stamp. Pass `-BuildStamp yyyyMMddHHmmss` to build a different dated release.
+
 The package is written to:
 
 ```text
@@ -90,6 +92,8 @@ To create a Windows setup executable with a SHA256 checksum:
 ```powershell
 .\Build-Windows-Installer.ps1
 ```
+
+The installer script uses the same `-BuildStamp` option as the portable build.
 
 The installer build uses NSIS. If `makensis.exe` is not installed, the build script downloads a portable NSIS copy under `target/nsis`. The generated installer installs for the current user and does not require admin rights.
 
