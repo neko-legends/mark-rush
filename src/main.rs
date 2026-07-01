@@ -305,8 +305,10 @@ struct TemporaryHierarchy {
 #[derive(Clone)]
 enum PendingAction {
     OpenFile(PathBuf),
+    OpenFileForEdit(PathBuf),
     OpenFileWithAnchor(PathBuf, String),
     SetRoot(PathBuf),
+    NewUntitled,
     ClearFile,
 }
 
@@ -335,6 +337,7 @@ struct MarkRushApp {
     root: Option<TreeEntry>,
     temporary_hierarchies: Vec<TemporaryHierarchy>,
     current_file: Option<PathBuf>,
+    untitled_document: bool,
     current_file_modified: Option<SystemTime>,
     document_text: String,
     saved_text: String,
@@ -385,6 +388,7 @@ impl MarkRushApp {
             root: None,
             temporary_hierarchies: Vec::new(),
             current_file: None,
+            untitled_document: false,
             current_file_modified: None,
             document_text: String::new(),
             saved_text: String::new(),
@@ -539,12 +543,10 @@ impl MarkRushApp {
                             self.open_folder_dialog();
                         }
 
-                        if ui
-                            .add_enabled(
-                                self.current_file.is_some(),
-                                egui::Button::new("New").fill(theme.button),
-                            )
-                            .on_hover_text("Create a Markdown file beside the selected file")
+                        if egui::Button::new("New")
+                            .fill(theme.button)
+                            .ui(ui)
+                            .on_hover_text("Create a Markdown document")
                             .clicked()
                         {
                             self.open_new_file_prompt();
@@ -715,12 +717,7 @@ impl MarkRushApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 3.0;
                 ui.vertical(|ui| {
-                    let file_name = self
-                        .current_file
-                        .as_ref()
-                        .and_then(|path| path.file_name())
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("No file selected");
+                    let file_name = self.current_document_name();
                     ui.add_sized(
                         [ui.available_width(), 20.0],
                         egui::Label::new(
@@ -735,11 +732,7 @@ impl MarkRushApp {
                     ui.horizontal(|ui| {
                         let row_width = ui.available_width();
                         let spacing = ui.spacing().item_spacing.x;
-                        let file_path = self
-                            .current_file
-                            .as_ref()
-                            .map(|path| display_path(path))
-                            .unwrap_or_default();
+                        let file_path = self.current_document_path_label();
                         ui.add_sized(
                             [
                                 (row_width - TOPBAR_PATH_COPY_WIDTH - spacing).max(0.0),
@@ -871,7 +864,7 @@ impl MarkRushApp {
             self.save_settings();
         }
 
-        let can_save = self.current_file.is_some() && (self.dirty || self.edit_mode);
+        let can_save = self.has_open_document() && (self.dirty || self.edit_mode);
         if toolbar_icon_button(ui, "💾", "Save", can_save, theme).clicked() {
             self.save_current_file();
         }
@@ -916,7 +909,7 @@ impl MarkRushApp {
                     }
 
                     let response = ui.add_enabled(
-                        self.current_file.is_some(),
+                        self.has_open_document(),
                         egui::TextEdit::singleline(&mut self.search_query)
                             .id(search_id)
                             .desired_width(280.0)
@@ -977,7 +970,7 @@ impl MarkRushApp {
     fn draw_reader(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme().clone();
 
-        if self.current_file.is_none() {
+        if !self.has_open_document() {
             ui.centered_and_justified(|ui| {
                 ui.label(
                     egui::RichText::new("Open a Markdown file")
@@ -1195,7 +1188,7 @@ impl MarkRushApp {
     fn draw_editor(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme().clone();
 
-        if self.current_file.is_none() {
+        if !self.has_open_document() {
             ui.centered_and_justified(|ui| {
                 ui.label("Open a Markdown file to edit");
             });
@@ -1215,7 +1208,7 @@ impl MarkRushApp {
                 self.current_file
                     .as_ref()
                     .map(|path| path.to_string_lossy().to_string())
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| "untitled-document".to_owned()),
             ))
             .desired_width(desired_width)
             .font(egui::FontId::new(font_size, font_family))
@@ -1227,7 +1220,7 @@ impl MarkRushApp {
             self.current_file
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string())
-                .unwrap_or_default(),
+                .unwrap_or_else(|| "untitled-document".to_owned()),
         );
 
         let response = if self.settings.word_wrap {
@@ -1345,7 +1338,11 @@ impl MarkRushApp {
                     .as_ref()
                     .and_then(|path| path.file_name())
                     .and_then(|name| name.to_str())
-                    .unwrap_or("this file");
+                    .unwrap_or(if self.untitled_document {
+                        "Untitled.md"
+                    } else {
+                        "this file"
+                    });
                 ui.label(format!("Save changes to {file_name}?"));
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -1387,7 +1384,7 @@ impl MarkRushApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label("Create beside the selected file:");
+                ui.label("File name:");
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.new_file_name)
                         .desired_width(280.0)
@@ -1568,7 +1565,7 @@ impl MarkRushApp {
                 self.open_print_preview();
             }
 
-            if self.current_file.is_some()
+            if self.has_open_document()
                 && input.modifiers.command
                 && (input.key_pressed(egui::Key::V) || input.key_pressed(egui::Key::X))
             {
@@ -1711,23 +1708,18 @@ impl MarkRushApp {
     }
 
     fn open_new_file_prompt(&mut self) {
-        if self.current_file_parent().is_none() {
-            self.set_status("Select a file before creating a new file");
+        let Some(parent) = self.new_file_parent() else {
+            self.request_action(PendingAction::NewUntitled);
             return;
-        }
+        };
 
-        self.new_file_name = unique_markdown_file_name(
-            &self
-                .current_file_parent()
-                .unwrap_or_else(|| PathBuf::from(".")),
-            "untitled.md",
-        );
+        self.new_file_name = unique_markdown_file_name(&parent, "untitled.md");
         self.show_new_file_prompt = true;
     }
 
     fn create_new_file_from_prompt(&mut self) {
-        let Some(parent) = self.current_file_parent() else {
-            self.set_status("Select a file before creating a new file");
+        let Some(parent) = self.new_file_parent() else {
+            self.request_action(PendingAction::NewUntitled);
             self.show_new_file_prompt = false;
             return;
         };
@@ -1746,7 +1738,7 @@ impl MarkRushApp {
             Ok(()) => {
                 self.show_new_file_prompt = false;
                 self.refresh_tree();
-                self.request_action(PendingAction::OpenFile(target));
+                self.request_action(PendingAction::OpenFileForEdit(target));
             }
             Err(error) => self.set_status(format!("Could not create file: {error}")),
         }
@@ -1847,6 +1839,11 @@ impl MarkRushApp {
             .map(Path::to_path_buf)
     }
 
+    fn new_file_parent(&self) -> Option<PathBuf> {
+        self.current_file_parent()
+            .or_else(|| self.root.as_ref().map(|root| root.path.clone()))
+    }
+
     fn handle_tree_action(&mut self, ctx: &egui::Context, action: TreeAction) {
         match action {
             TreeAction::OpenFile(path) => self.request_open_file(path),
@@ -1889,6 +1886,7 @@ impl MarkRushApp {
     fn apply_action(&mut self, action: PendingAction) {
         match action {
             PendingAction::OpenFile(path) => self.load_file(path),
+            PendingAction::OpenFileForEdit(path) => self.load_file_for_edit(path),
             PendingAction::OpenFileWithAnchor(path, fragment) => {
                 self.load_file(path);
                 self.jump_to_anchor(&fragment);
@@ -1897,6 +1895,7 @@ impl MarkRushApp {
                 self.set_root(path);
                 self.apply_action(PendingAction::ClearFile);
             }
+            PendingAction::NewUntitled => self.start_untitled_document(),
             PendingAction::ClearFile => self.clear_file(),
         }
     }
@@ -1955,7 +1954,13 @@ impl MarkRushApp {
         self.load_file_with_status(path, "Loaded");
     }
 
-    fn load_file_with_status(&mut self, path: PathBuf, verb: &str) {
+    fn load_file_for_edit(&mut self, path: PathBuf) {
+        if self.load_file_with_status(path, "Created") {
+            self.edit_mode = true;
+        }
+    }
+
+    fn load_file_with_status(&mut self, path: PathBuf, verb: &str) -> bool {
         let full_path = absolute_path(&path);
         match fs::read(&full_path) {
             Ok(bytes) => {
@@ -1963,6 +1968,7 @@ impl MarkRushApp {
                 self.saved_text = self.document_text.clone();
                 self.render_lines = parse_markdown_lines(&self.document_text);
                 self.current_file = Some(full_path.clone());
+                self.untitled_document = false;
                 self.current_file_modified = file_modified_time(&full_path).ok();
                 self.dirty = false;
                 self.edit_mode = false;
@@ -1976,15 +1982,36 @@ impl MarkRushApp {
                 self.save_settings();
                 self.rebuild_search();
                 self.set_status(format!("{verb} {}", display_path(&full_path)));
+                true
             }
             Err(error) => {
                 self.set_status(format!("Could not load file: {error}"));
+                false
             }
         }
     }
 
+    fn start_untitled_document(&mut self) {
+        self.current_file = None;
+        self.untitled_document = true;
+        self.current_file_modified = None;
+        self.document_text.clear();
+        self.saved_text.clear();
+        self.render_lines.clear();
+        self.dirty = false;
+        self.edit_mode = true;
+        self.code_copy_feedback = None;
+        self.pending_scroll_line = None;
+        self.search_matches.clear();
+        self.current_match = 0;
+        self.settings.last_file_path = None;
+        self.save_settings();
+        self.set_status("New untitled Markdown document");
+    }
+
     fn clear_file(&mut self) {
         self.current_file = None;
+        self.untitled_document = false;
         self.current_file_modified = None;
         self.document_text.clear();
         self.saved_text.clear();
@@ -1999,16 +2026,39 @@ impl MarkRushApp {
     }
 
     fn save_current_file(&mut self) -> bool {
-        let Some(path) = self.current_file.clone() else {
-            return false;
+        let path = match self.current_file.clone() {
+            Some(path) => path,
+            None if self.untitled_document => {
+                let Some(path) = self.pick_untitled_save_path() else {
+                    self.set_status("Save cancelled");
+                    return false;
+                };
+                path
+            }
+            None => {
+                self.set_status("No file to save");
+                return false;
+            }
         };
 
         match fs::write(&path, self.document_text.as_bytes()) {
             Ok(()) => {
+                let path = absolute_path(&path);
+                self.current_file = Some(path.clone());
+                self.untitled_document = false;
                 self.saved_text = self.document_text.clone();
                 self.current_file_modified = file_modified_time(&path).ok();
                 self.dirty = false;
                 self.render_lines = parse_markdown_lines(&self.document_text);
+                self.settings.last_file_path = Some(path.clone());
+                if let Some(parent) = path.parent() {
+                    if self.root.is_none() {
+                        self.set_root(parent.to_path_buf());
+                    } else {
+                        self.refresh_tree_silent();
+                    }
+                }
+                self.save_settings();
                 self.rebuild_search();
                 self.set_status("Saved");
                 true
@@ -2018,6 +2068,18 @@ impl MarkRushApp {
                 false
             }
         }
+    }
+
+    fn pick_untitled_save_path(&self) -> Option<PathBuf> {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Markdown", MARKDOWN_EXTENSIONS)
+            .set_file_name("untitled.md");
+
+        if let Some(parent) = self.new_file_parent() {
+            dialog = dialog.set_directory(parent);
+        }
+
+        dialog.save_file().map(with_default_markdown_extension)
     }
 
     fn open_print_preview(&mut self) {
@@ -2081,7 +2143,7 @@ impl MarkRushApp {
     }
 
     fn search_status(&self) -> String {
-        if self.current_file.is_none() {
+        if !self.has_open_document() {
             "No file".to_owned()
         } else if self.search_query.trim().is_empty() {
             "No search".to_owned()
@@ -2103,6 +2165,38 @@ impl MarkRushApp {
             status.push_str("...");
         }
         self.status = status;
+    }
+
+    fn has_open_document(&self) -> bool {
+        self.current_file.is_some() || self.untitled_document
+    }
+
+    fn current_document_name(&self) -> String {
+        self.current_file
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                if self.untitled_document {
+                    "Untitled.md".to_owned()
+                } else {
+                    "No file selected".to_owned()
+                }
+            })
+    }
+
+    fn current_document_path_label(&self) -> String {
+        self.current_file
+            .as_ref()
+            .map(|path| display_path(path))
+            .unwrap_or_else(|| {
+                if self.untitled_document {
+                    "Unsaved document".to_owned()
+                } else {
+                    String::new()
+                }
+            })
     }
 
     fn document_font_size(&self) -> f32 {
@@ -3545,6 +3639,14 @@ fn normalized_prompt_file_name(input: &str, default_markdown_extension: bool) ->
     }
 
     Some(name)
+}
+
+fn with_default_markdown_extension(path: PathBuf) -> PathBuf {
+    if path.extension().is_some() {
+        path
+    } else {
+        path.with_extension("md")
+    }
 }
 
 fn unique_markdown_file_name(parent: &Path, base_name: &str) -> String {
