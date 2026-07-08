@@ -26,6 +26,7 @@ const DEFAULT_DOCUMENT_FONT_SIZE: f32 = 15.0;
 const FONT_SIZE_OPTIONS: &[f32] = &[12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [840.0, 520.0];
 const FIRST_LAUNCH_WINDOW_SCREEN_SCALE: f32 = 0.5;
+const PORTRAIT_WINDOW_WIDTH_RATIO: f32 = 0.9;
 const UNWRAPPED_DOCUMENT_WIDTH: f32 = 12_000.0;
 const TOPBAR_PATH_COPY_WIDTH: f32 = 30.0;
 const TOPBAR_LEFT_CONTROLS_WIDTH: f32 = 220.0;
@@ -89,6 +90,16 @@ fn saved_window_size(settings: &AppSettings) -> Option<[f32; 2]> {
 }
 
 fn first_launch_window_size(monitor_size: egui::Vec2) -> egui::Vec2 {
+    if monitor_size.x < monitor_size.y {
+        let width = (monitor_size.x * PORTRAIT_WINDOW_WIDTH_RATIO)
+            .max(MIN_WINDOW_SIZE[0])
+            .min(monitor_size.x.max(1.0));
+        let height = (width * (MIN_WINDOW_SIZE[1] / MIN_WINDOW_SIZE[0]))
+            .max(MIN_WINDOW_SIZE[1])
+            .min(monitor_size.y.max(1.0));
+        return egui::vec2(width, height);
+    }
+
     egui::vec2(
         (monitor_size.x * FIRST_LAUNCH_WINDOW_SCREEN_SCALE).max(MIN_WINDOW_SIZE[0]),
         (monitor_size.y * FIRST_LAUNCH_WINDOW_SCREEN_SCALE).max(MIN_WINDOW_SIZE[1]),
