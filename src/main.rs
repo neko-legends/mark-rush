@@ -20,6 +20,9 @@ const MAX_STORED_STATUS: usize = 180;
 const MAX_STORED_FILE_VIEW_STATES: usize = 250;
 const MIDDLE_SCROLL_DEAD_ZONE: f32 = 8.0;
 const MIDDLE_SCROLL_MAX_SPEED: f32 = 80.0;
+const SELECTION_SCROLL_DEAD_ZONE: f32 = 20.0;
+const SELECTION_SCROLL_MAX_SPEED: f32 = 95.0;
+const SELECTION_SCROLL_ZONE_MULTIPLIER: f32 = 3.5;
 const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const DEFAULT_DOCUMENT_FONT_FAMILY: &str = "System UI";
 const DEFAULT_DOCUMENT_FONT_SIZE: f32 = 15.0;
@@ -1240,6 +1243,7 @@ impl MarkRushApp {
                 .content_margin(egui::Margin::same(14))
                 .auto_shrink([false, false])
                 .show(ui, |ui| ui.add_sized(ui.available_size(), edit));
+            self.apply_selection_drag_scroll(ui, &output, false, true);
             self.apply_middle_mouse_scroll(ui, &output, false, true);
             output.inner
         } else {
@@ -1250,6 +1254,7 @@ impl MarkRushApp {
                 .show(ui, |ui| {
                     ui.add_sized(egui::vec2(desired_width, ui.available_height()), edit)
                 });
+            self.apply_selection_drag_scroll(ui, &output, true, true);
             self.apply_middle_mouse_scroll(ui, &output, true, true);
             output.inner
         };
@@ -1335,6 +1340,93 @@ impl MarkRushApp {
             state.store(ui.ctx(), output.id);
         }
         ui.ctx().request_repaint_after(ANIMATION_FRAME_INTERVAL);
+    }
+
+    fn apply_selection_drag_scroll<R>(
+        &mut self,
+        ui: &mut egui::Ui,
+        output: &egui::containers::scroll_area::ScrollAreaOutput<R>,
+        allow_x: bool,
+        allow_y: bool,
+    ) {
+        let (primary_down, pointer_pos) = ui.input(|input| {
+            (
+                input.pointer.button_down(egui::PointerButton::Primary),
+                input.pointer.latest_pos(),
+            )
+        });
+
+        let Some(pointer_pos) = pointer_pos else {
+            return;
+        };
+
+        if !primary_down {
+            return;
+        }
+
+        let mut state = output.state;
+        let mut changed = false;
+        let max_offset = output.content_size - output.inner_rect.size();
+        let frame_scale = ui.input(|input| (input.stable_dt / (1.0 / 60.0)).clamp(0.25, 3.0));
+        let dead_zone = SELECTION_SCROLL_DEAD_ZONE;
+        let max_speed = SELECTION_SCROLL_MAX_SPEED;
+
+        let vertical_margin = SELECTION_SCROLL_ZONE_MULTIPLIER * dead_zone;
+        let horizontal_margin = SELECTION_SCROLL_ZONE_MULTIPLIER * dead_zone;
+        let edge_rect = output.inner_rect.expand(horizontal_margin.max(vertical_margin));
+
+        if !edge_rect.contains(pointer_pos) {
+            return;
+        }
+
+        if allow_y {
+            let mut delta_y = 0.0;
+            if pointer_pos.y < output.inner_rect.min.y {
+                delta_y = -(selection_scroll_speed(
+                    output.inner_rect.min.y - pointer_pos.y,
+                    dead_zone,
+                    max_speed,
+                ) * frame_scale);
+            } else if pointer_pos.y > output.inner_rect.max.y {
+                delta_y = selection_scroll_speed(
+                    pointer_pos.y - output.inner_rect.max.y,
+                    dead_zone,
+                    max_speed,
+                ) * frame_scale;
+            }
+
+            if delta_y != 0.0 {
+                state.offset.y = (state.offset.y + delta_y).clamp(0.0, max_offset.y.max(0.0));
+                changed = true;
+            }
+        }
+
+        if allow_x {
+            let mut delta_x = 0.0;
+            if pointer_pos.x < output.inner_rect.min.x {
+                delta_x = -(selection_scroll_speed(
+                    output.inner_rect.min.x - pointer_pos.x,
+                    dead_zone,
+                    max_speed,
+                ) * frame_scale);
+            } else if pointer_pos.x > output.inner_rect.max.x {
+                delta_x = selection_scroll_speed(
+                    pointer_pos.x - output.inner_rect.max.x,
+                    dead_zone,
+                    max_speed,
+                ) * frame_scale;
+            }
+
+            if delta_x != 0.0 {
+                state.offset.x = (state.offset.x + delta_x).clamp(0.0, max_offset.x.max(0.0));
+                changed = true;
+            }
+        }
+
+        if changed {
+            state.store(ui.ctx(), output.id);
+            ui.ctx().request_repaint_after(ANIMATION_FRAME_INTERVAL);
+        }
     }
 
     fn draw_save_prompt(&mut self, ctx: &egui::Context) {
@@ -3919,6 +4011,16 @@ fn line_index_at_reader_offset(heights: &[f32], offset: f32) -> usize {
     }
 
     heights.len().saturating_sub(1)
+}
+
+fn selection_scroll_speed(distance: f32, dead_zone: f32, max_speed: f32) -> f32 {
+    if distance <= dead_zone {
+        return 0.0;
+    }
+
+    let span = dead_zone * SELECTION_SCROLL_ZONE_MULTIPLIER;
+    let clamped = (distance - dead_zone) / span;
+    (clamped.min(1.0).max(0.0) * max_speed).ceil()
 }
 
 fn reader_scroll_overscan(viewport_height: f32) -> f32 {
