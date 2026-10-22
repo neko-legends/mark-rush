@@ -28,6 +28,7 @@ The app is written in Rust with egui/eframe and is intended to run on Windows, m
 - Start first launch at one-quarter of the current screen area, then remember user resizing.
 - Includes Venice-style themes plus High Contrast.
 - Bundles redistributable document fonts: Noto Sans, Noto Serif, Lora, Poppins, and Roboto Mono.
+- Uses the shared Neko Legends language packs: fonts installed from the Control Center (Settings → Languages) render Japanese, Chinese, Korean, Cyrillic, Thai, and Arabic text in documents, and unlock the matching UI language in the 🌐 picker. MarkRush itself ships English only.
 - Writes crash logs to the platform app config directory.
 
 ## Download
@@ -42,8 +43,8 @@ Windows releases include a portable executable and an optional user-level instal
 Install Rust from [rustup.rs](https://rustup.rs/), then clone and build:
 
 ```powershell
-git clone https://github.com/flashosophy/MarkRush.git
-cd MarkRush
+git clone https://github.com/neko-legends/mark-rush.git
+cd mark-rush
 cargo build --release
 ```
 
@@ -73,7 +74,7 @@ To create a Windows portable executable with a SHA256 checksum:
 .\Build-Windows.ps1
 ```
 
-The script defaults to the `v26.8.9` release stamp. Pass `-BuildStamp yyyyMMddHHmmss` to build a different dated release.
+The script defaults to the `v26.8.10` release stamp. Pass `-BuildStamp yyyyMMddHHmmss` to build a different dated release.
 
 The package is written to:
 
@@ -81,7 +82,7 @@ The package is written to:
 release/portable/
 ```
 
-The Windows portable folder contains `markrush.exe` and a matching SHA256 checksum. The release binary embeds the app icon, generated version metadata, and uses the Windows GUI subsystem so double-clicking it does not open a blank console.
+The Windows portable folder contains `markrush.exe` and a matching SHA256 checksum. The release binary embeds the app icon, generated version metadata, statically links the Microsoft C runtime so it can run without a separate Visual C++ runtime install, and uses the Windows GUI subsystem so double-clicking it does not open a blank console.
 
 If Windows resource embedding fails, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.
 

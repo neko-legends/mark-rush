@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Fast cross-platform local Markdown viewer/editor"
-repository = "https://github.com/flashosophy/MarkRush"
+repository = "https://github.com/neko-legends/mark-rush"
 
 [dependencies]
 directories = "6.0.0"

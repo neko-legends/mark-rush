@@ -14,6 +14,10 @@ use eframe::egui;
 use eframe::egui::Widget;
 use serde::{Deserialize, Serialize};
 
+mod i18n;
+
+use i18n::{tr, trf};
+
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mdx", "mkd", "rmd"];
 const APP_BUILD_LABEL: &str = env!("MARKRUSH_BUILD_LABEL");
 const MAX_STORED_STATUS: usize = 180;
@@ -119,6 +123,7 @@ struct AppSettings {
     render_markdown: bool,
     document_font_family: String,
     document_font_size: f32,
+    ui_language: String,
     window_width: Option<f32>,
     window_height: Option<f32>,
     file_view_states: HashMap<PathBuf, FileViewState>,
@@ -134,6 +139,7 @@ impl Default for AppSettings {
             render_markdown: true,
             document_font_family: DEFAULT_DOCUMENT_FONT_FAMILY.to_owned(),
             document_font_size: DEFAULT_DOCUMENT_FONT_SIZE,
+            ui_language: i18n::ENGLISH.to_owned(),
             window_width: None,
             window_height: None,
             file_view_states: HashMap::new(),
@@ -348,6 +354,8 @@ enum InitialWindowFit {
 struct MarkRushApp {
     settings: AppSettings,
     settings_path: Option<PathBuf>,
+    language_packs: Vec<i18n::LanguagePack>,
+    ui_language: &'static str,
     root: Option<TreeEntry>,
     temporary_hierarchies: Vec<TemporaryHierarchy>,
     current_file: Option<PathBuf>,
@@ -382,10 +390,12 @@ struct MarkRushApp {
 impl MarkRushApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_pixels_per_point(1.0);
-        install_system_fonts(&cc.egui_ctx);
 
         let settings_path = settings_path();
         let settings = load_settings(settings_path.as_deref());
+        let language_packs = i18n::scan_language_packs();
+        let ui_language = i18n::apply_ui_language(&settings.ui_language, &language_packs);
+        install_system_fonts(&cc.egui_ctx, &language_packs, ui_language);
         let theme_index = theme_index_by_name(&settings.theme_name);
         let initial_window_fit = if saved_window_size(&settings).is_some() {
             InitialWindowFit::NotNeeded
@@ -399,6 +409,8 @@ impl MarkRushApp {
         let mut app = Self {
             settings,
             settings_path,
+            language_packs,
+            ui_language,
             root: None,
             temporary_hierarchies: Vec::new(),
             current_file: None,
@@ -413,7 +425,7 @@ impl MarkRushApp {
             search_matches: Vec::new(),
             current_match: 0,
             code_copy_feedback: None,
-            status: "Ready".to_owned(),
+            status: tr("Ready"),
             theme_index,
             pending_action: None,
             show_save_prompt: false,
@@ -544,23 +556,29 @@ impl MarkRushApp {
                 .layout(egui::Layout::top_down(egui::Align::Min)),
             |ui| {
                 ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Mark Rush")
-                            .strong()
-                            .color(theme.muted)
-                            .size(13.0),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Mark Rush")
+                                .strong()
+                                .color(theme.muted)
+                                .size(13.0),
+                        );
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| self.draw_language_picker(ui, &theme),
+                        );
+                    });
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if themed_button(ui, "Open Folder", &theme).clicked() {
+                        if themed_button(ui, &tr("Open Folder"), &theme).clicked() {
                             self.open_folder_dialog();
                         }
 
-                        if egui::Button::new("New")
+                        if egui::Button::new(tr("New"))
                             .fill(theme.button)
                             .ui(ui)
-                            .on_hover_text("Create a Markdown document")
+                            .on_hover_text(tr("Create a Markdown document"))
                             .clicked()
                         {
                             self.open_new_file_prompt();
@@ -572,7 +590,7 @@ impl MarkRushApp {
                         .root
                         .as_ref()
                         .map(|entry| display_path(&entry.path))
-                        .unwrap_or_else(|| "No folder open".to_owned());
+                        .unwrap_or_else(|| tr("No folder open"));
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(root_label)
@@ -599,7 +617,7 @@ impl MarkRushApp {
                                 }
                             } else if self.temporary_hierarchies.is_empty() {
                                 ui.label(
-                                    egui::RichText::new("Open a folder to browse Markdown files.")
+                                    egui::RichText::new(tr("Open a folder to browse Markdown files."))
                                         .color(theme.muted),
                                 );
                             }
@@ -610,7 +628,7 @@ impl MarkRushApp {
                                 ui.add_space(10.0);
                                 ui.separator();
                                 ui.horizontal(|ui| {
-                                    if egui::Button::new("Close")
+                                    if egui::Button::new(tr("Close"))
                                         .fill(theme.button)
                                         .ui(ui)
                                         .clicked()
@@ -765,11 +783,11 @@ impl MarkRushApp {
                                     .fill(theme.button)
                                     .min_size(egui::vec2(TOPBAR_PATH_COPY_WIDTH, 22.0)),
                             )
-                            .on_hover_text("Copy path");
+                            .on_hover_text(tr("Copy path"));
                         if copy_response.clicked() {
                             if let Some(path) = &self.current_file {
                                 ui.ctx().copy_text(display_path(path));
-                                self.set_status("Copied file path");
+                                self.set_status(tr("Copied file path"));
                             }
                         }
                     });
@@ -788,20 +806,20 @@ impl MarkRushApp {
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 let mut edit = self.edit_mode;
-                                if ui.checkbox(&mut edit, "Edit").changed() {
+                                if ui.checkbox(&mut edit, tr("Edit")).changed() {
                                     self.edit_mode = edit;
                                 }
 
                                 let mut wrap = self.settings.word_wrap;
-                                if ui.checkbox(&mut wrap, "Wrap").changed() {
+                                if ui.checkbox(&mut wrap, tr("Wrap")).changed() {
                                     self.settings.word_wrap = wrap;
                                     self.save_settings();
                                 }
 
                                 let mode_label = if self.settings.render_markdown {
-                                    "Markdown"
+                                    tr("Markdown")
                                 } else {
-                                    "Plain"
+                                    tr("Plain")
                                 };
                                 if egui::Button::new(mode_label)
                                     .fill(theme.button)
@@ -879,11 +897,11 @@ impl MarkRushApp {
         }
 
         let can_save = self.has_open_document() && (self.dirty || self.edit_mode);
-        if toolbar_icon_button(ui, "💾", "Save", can_save, theme).clicked() {
+        if toolbar_icon_button(ui, "💾", &tr("Save"), can_save, theme).clicked() {
             self.save_current_file();
         }
 
-        if toolbar_icon_button(ui, "🖨", "Print preview", self.current_file.is_some(), theme)
+        if toolbar_icon_button(ui, "🖨", &tr("Print preview"), self.current_file.is_some(), theme)
             .clicked()
         {
             self.open_print_preview();
@@ -892,7 +910,7 @@ impl MarkRushApp {
         if toolbar_icon_button(
             ui,
             "📁",
-            "Show in file browser",
+            &tr("Show in file browser"),
             self.current_file.is_some(),
             theme,
         )
@@ -900,9 +918,9 @@ impl MarkRushApp {
         {
             if let Some(path) = &self.current_file {
                 if let Err(error) = show_in_file_browser(path) {
-                    self.set_status(format!("Could not show file: {error}"));
+                    self.set_status(trf("Could not show file: {0}", &[&error]));
                 } else {
-                    self.set_status("Opened file in system file browser");
+                    self.set_status(tr("Opened file in system file browser"));
                 }
             }
         }
@@ -927,7 +945,7 @@ impl MarkRushApp {
                         egui::TextEdit::singleline(&mut self.search_query)
                             .id(search_id)
                             .desired_width(280.0)
-                            .hint_text("Search"),
+                            .hint_text(tr("Search")),
                     );
 
                     if response.changed() {
@@ -937,7 +955,7 @@ impl MarkRushApp {
                     if ui
                         .add_enabled(
                             !self.search_matches.is_empty(),
-                            egui::Button::new("Previous").fill(theme.button),
+                            egui::Button::new(tr("Previous")).fill(theme.button),
                         )
                         .clicked()
                     {
@@ -947,7 +965,7 @@ impl MarkRushApp {
                     if ui
                         .add_enabled(
                             !self.search_matches.is_empty(),
-                            egui::Button::new("Next").fill(theme.button),
+                            egui::Button::new(tr("Next")).fill(theme.button),
                         )
                         .clicked()
                     {
@@ -969,10 +987,12 @@ impl MarkRushApp {
                     ui.label(egui::RichText::new(APP_BUILD_LABEL).color(theme.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "{} lines, {} chars",
-                                document_line_count(&self.document_text),
-                                self.document_text.chars().count()
+                            egui::RichText::new(trf(
+                                "{0} lines, {1} chars",
+                                &[
+                                    &document_line_count(&self.document_text),
+                                    &self.document_text.chars().count(),
+                                ],
                             ))
                             .color(theme.muted),
                         );
@@ -987,7 +1007,102 @@ impl MarkRushApp {
         if !self.has_open_document() {
             ui.centered_and_justified(|ui| {
                 ui.label(
-                    egui::RichText::new("Open a Markdown file")
+                    egui::RichText::new(tr("Open a Markdown file"))
+                        .color(theme.muted)
+                        .size(18.0),
+                );
+            });
+            return;
+        }
+
+        if self.settings.render_markdown {
+            self.draw_continuous_markdown_reader(ui);
+        } else {
+            self.draw_plain_reader(ui);
+        }
+    }
+
+    fn draw_continuous_markdown_reader(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme().clone();
+        let font_size = self.document_font_size();
+        let font_family = self.document_font_family();
+        let current_match_line = self
+            .search_matches
+            .get(self.current_match)
+            .map(|search_match| search_match.line_index);
+        let base_job = rendered_reader_layout_job(
+            &self.render_lines,
+            &theme,
+            font_size,
+            &font_family,
+            current_match_line,
+        );
+        let reader_text = base_job.text.clone();
+        let mut reader_buffer = reader_text.as_str();
+        let wrap = self.settings.word_wrap;
+        let available_size = ui.available_size();
+        let desired_width = if wrap {
+            available_size.x
+        } else {
+            UNWRAPPED_DOCUMENT_WIDTH
+        };
+        let reader_id = egui::Id::new("continuous-markdown-reader").with(
+            self.current_file
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+        let mut layouter = move |ui: &egui::Ui, _text: &dyn egui::TextBuffer, wrap_width: f32| {
+            let mut job = base_job.clone();
+            job.wrap.max_width = if wrap { wrap_width } else { f32::INFINITY };
+            ui.fonts_mut(|fonts| fonts.layout_job(job))
+        };
+        let text_edit = egui::TextEdit::multiline(&mut reader_buffer)
+            .id(reader_id)
+            .desired_width(desired_width)
+            .min_size(egui::vec2(desired_width, available_size.y))
+            .frame(egui::Frame::NONE)
+            .layouter(&mut layouter);
+        let scroll_id = egui::Id::new("continuous-markdown-reader-scroll").with(reader_id);
+        let mut scroll = if wrap {
+            egui::ScrollArea::vertical()
+        } else {
+            egui::ScrollArea::both()
+        }
+        .id_salt(scroll_id)
+        .content_margin(egui::Margin::symmetric(18, 12))
+        .auto_shrink([false, false]);
+
+        if let Some(line) = self.pending_scroll_line.take() {
+            scroll = scroll.vertical_scroll_offset(line as f32 * reader_row_height(font_size));
+        }
+
+        let output = scroll.show(ui, |ui| text_edit.show(ui));
+        apply_editor_keyboard_selection_scroll(ui, &output, font_size);
+        self.apply_selection_drag_scroll(ui, &output, !wrap, true);
+        self.apply_middle_mouse_scroll(ui, &output, !wrap, true);
+
+        let reader_line = (output.state.offset.y / reader_row_height(font_size))
+            .floor()
+            .max(0.0) as usize;
+        if let Some(path) = self.current_file.clone() {
+            let state = FileViewState { reader_line };
+            if self.settings.file_view_states.get(&path) != Some(&state) {
+                self.settings.file_view_states.insert(path, state);
+                self.trim_stored_file_view_states();
+                self.save_settings();
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn draw_segmented_reader(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme().clone();
+
+        if !self.has_open_document() {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new(tr("Open a Markdown file"))
                         .color(theme.muted)
                         .size(18.0),
                 );
@@ -1204,7 +1319,7 @@ impl MarkRushApp {
 
         if !self.has_open_document() {
             ui.centered_and_justified(|ui| {
-                ui.label("Open a Markdown file to edit");
+                ui.label(tr("Open a Markdown file to edit"));
             });
             return;
         }
@@ -1217,14 +1332,17 @@ impl MarkRushApp {
         let font_size = self.document_font_size();
         let font_family = self.document_editor_font_family();
 
+        let editor_id = egui::Id::new("editor").with(
+            self.current_file
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| "untitled-document".to_owned()),
+        );
+        let editor_viewport_size = ui.available_size();
         let edit = egui::TextEdit::multiline(&mut self.document_text)
-            .id(egui::Id::new("editor").with(
-                self.current_file
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "untitled-document".to_owned()),
-            ))
+            .id(editor_id)
             .desired_width(desired_width)
+            .min_size(egui::vec2(desired_width, editor_viewport_size.y))
             .font(egui::FontId::new(font_size, font_family))
             .text_color(theme.text)
             .code_editor()
@@ -1237,29 +1355,25 @@ impl MarkRushApp {
                 .unwrap_or_else(|| "untitled-document".to_owned()),
         );
 
-        let response = if self.settings.word_wrap {
-            let output = egui::ScrollArea::vertical()
+        let output = if self.settings.word_wrap {
+            egui::ScrollArea::vertical()
                 .id_salt(editor_scroll_id.with("wrap"))
                 .content_margin(egui::Margin::same(14))
                 .auto_shrink([false, false])
-                .show(ui, |ui| ui.add_sized(ui.available_size(), edit));
-            self.apply_selection_drag_scroll(ui, &output, false, true);
-            self.apply_middle_mouse_scroll(ui, &output, false, true);
-            output.inner
+                .show(ui, |ui| edit.show(ui))
         } else {
-            let output = egui::ScrollArea::both()
+            egui::ScrollArea::both()
                 .id_salt(editor_scroll_id.with("both"))
                 .content_margin(egui::Margin::same(14))
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.add_sized(egui::vec2(desired_width, ui.available_height()), edit)
-                });
-            self.apply_selection_drag_scroll(ui, &output, true, true);
-            self.apply_middle_mouse_scroll(ui, &output, true, true);
-            output.inner
+                .show(ui, |ui| edit.show(ui))
         };
 
-        if response.changed() {
+        apply_editor_keyboard_selection_scroll(ui, &output, font_size);
+        self.apply_selection_drag_scroll(ui, &output, !self.settings.word_wrap, true);
+        self.apply_middle_mouse_scroll(ui, &output, !self.settings.word_wrap, true);
+
+        if output.inner.response.changed() {
             self.dirty = self.document_text != self.saved_text;
             self.render_lines = parse_markdown_lines(&self.document_text);
             self.rebuild_search();
@@ -1373,7 +1487,9 @@ impl MarkRushApp {
 
         let vertical_margin = SELECTION_SCROLL_ZONE_MULTIPLIER * dead_zone;
         let horizontal_margin = SELECTION_SCROLL_ZONE_MULTIPLIER * dead_zone;
-        let edge_rect = output.inner_rect.expand(horizontal_margin.max(vertical_margin));
+        let edge_rect = output
+            .inner_rect
+            .expand(horizontal_margin.max(vertical_margin));
 
         if !edge_rect.contains(pointer_pos) {
             return;
@@ -1431,11 +1547,13 @@ impl MarkRushApp {
 
     fn draw_save_prompt(&mut self, ctx: &egui::Context) {
         let theme = self.theme().clone();
-        egui::Window::new("Unsaved changes")
+        egui::Window::new(tr("Unsaved changes"))
+            .id(egui::Id::new("markrush-unsaved-changes"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
+                let this_file_label = tr("this file");
                 let file_name = self
                     .current_file
                     .as_ref()
@@ -1444,12 +1562,12 @@ impl MarkRushApp {
                     .unwrap_or(if self.untitled_document {
                         "Untitled.md"
                     } else {
-                        "this file"
+                        this_file_label.as_str()
                     });
-                ui.label(format!("Save changes to {file_name}?"));
+                ui.label(trf("Save changes to {0}?", &[&file_name]));
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if egui::Button::new("Save")
+                    if egui::Button::new(tr("Save"))
                         .fill(theme.button)
                         .ui(ui)
                         .clicked()
@@ -1459,7 +1577,7 @@ impl MarkRushApp {
                         }
                     }
 
-                    if egui::Button::new("Discard")
+                    if egui::Button::new(tr("Discard"))
                         .fill(theme.button)
                         .ui(ui)
                         .clicked()
@@ -1468,7 +1586,7 @@ impl MarkRushApp {
                         self.finish_pending_action();
                     }
 
-                    if egui::Button::new("Cancel")
+                    if egui::Button::new(tr("Cancel"))
                         .fill(theme.button)
                         .ui(ui)
                         .clicked()
@@ -1482,12 +1600,13 @@ impl MarkRushApp {
 
     fn draw_new_file_prompt(&mut self, ctx: &egui::Context) {
         let theme = self.theme().clone();
-        egui::Window::new("New file")
+        egui::Window::new(tr("New file"))
+            .id(egui::Id::new("markrush-new-file"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label("File name:");
+                ui.label(tr("File name:"));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.new_file_name)
                         .desired_width(280.0)
@@ -1499,7 +1618,7 @@ impl MarkRushApp {
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if egui::Button::new("Create")
+                    if egui::Button::new(tr("Create"))
                         .fill(theme.button)
                         .ui(ui)
                         .clicked()
@@ -1507,7 +1626,7 @@ impl MarkRushApp {
                         self.create_new_file_from_prompt();
                     }
 
-                    if egui::Button::new("Cancel")
+                    if egui::Button::new(tr("Cancel"))
                         .fill(theme.button)
                         .ui(ui)
                         .clicked()
@@ -1520,12 +1639,13 @@ impl MarkRushApp {
 
     fn draw_rename_prompt(&mut self, ctx: &egui::Context) {
         let theme = self.theme().clone();
-        egui::Window::new("Rename")
+        egui::Window::new(tr("Rename"))
+            .id(egui::Id::new("markrush-rename"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label("New name:");
+                ui.label(tr("New name:"));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.rename_name)
                         .desired_width(280.0)
@@ -1537,7 +1657,7 @@ impl MarkRushApp {
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if egui::Button::new("Rename")
+                    if egui::Button::new(tr("Rename"))
                         .fill(theme.button)
                         .ui(ui)
                         .clicked()
@@ -1545,7 +1665,7 @@ impl MarkRushApp {
                         self.rename_item_from_prompt();
                     }
 
-                    if egui::Button::new("Cancel")
+                    if egui::Button::new(tr("Cancel"))
                         .fill(theme.button)
                         .ui(ui)
                         .clicked()
@@ -1568,7 +1688,8 @@ impl MarkRushApp {
             };
             let page_count = preview.pages.len();
 
-            egui::Window::new("Print preview")
+            egui::Window::new(tr("Print preview"))
+                .id(egui::Id::new("markrush-print-preview"))
                 .collapsible(false)
                 .resizable(true)
                 .default_size(egui::vec2(760.0, 620.0))
@@ -1586,7 +1707,7 @@ impl MarkRushApp {
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
-                                egui::RichText::new(format!("{page_count} page(s)"))
+                                egui::RichText::new(trf("{0} page(s)", &[&page_count]))
                                     .color(theme.muted),
                             );
                         });
@@ -1599,9 +1720,9 @@ impl MarkRushApp {
                         .show(ui, |ui| {
                             for (index, page) in preview.pages.iter().enumerate() {
                                 ui.label(
-                                    egui::RichText::new(format!(
-                                        "Page {} of {page_count}",
-                                        index + 1
+                                    egui::RichText::new(trf(
+                                        "Page {0} of {1}",
+                                        &[&(index + 1), &page_count],
                                     ))
                                     .color(theme.muted)
                                     .size(12.0),
@@ -1631,7 +1752,7 @@ impl MarkRushApp {
 
                     ui.separator();
                     ui.horizontal(|ui| {
-                        if egui::Button::new("Print")
+                        if egui::Button::new(tr("Print"))
                             .fill(theme.button)
                             .ui(ui)
                             .clicked()
@@ -1639,7 +1760,7 @@ impl MarkRushApp {
                             should_print = true;
                         }
 
-                        if egui::Button::new("Close")
+                        if egui::Button::new(tr("Close"))
                             .fill(theme.button)
                             .ui(ui)
                             .clicked()
@@ -1713,6 +1834,73 @@ impl MarkRushApp {
         if regained_focus {
             self.refresh_tree_silent();
             self.reload_current_file_if_changed_on_disk();
+            self.refresh_language_packs(ctx);
+        }
+    }
+
+    /// Pick up language packs installed or removed by the Control Center
+    /// while MarkRush was running.
+    fn refresh_language_packs(&mut self, ctx: &egui::Context) {
+        let packs = i18n::scan_language_packs();
+        if i18n::packs_fingerprint(&packs) == i18n::packs_fingerprint(&self.language_packs) {
+            return;
+        }
+        self.language_packs = packs;
+        self.ui_language = i18n::apply_ui_language(&self.settings.ui_language, &self.language_packs);
+        install_system_fonts(ctx, &self.language_packs, self.ui_language);
+        self.set_status(tr("Language packs updated"));
+    }
+
+    fn set_ui_language(&mut self, ctx: &egui::Context, code: &str) {
+        self.settings.ui_language = code.to_owned();
+        self.save_settings();
+        self.ui_language = i18n::apply_ui_language(code, &self.language_packs);
+        install_system_fonts(ctx, &self.language_packs, self.ui_language);
+        self.set_status(tr("Language changed"));
+    }
+
+    fn draw_language_picker(&mut self, ui: &mut egui::Ui, theme: &AppTheme) {
+        let current_label =
+            i18n::ui_language(self.ui_language).map_or("English", |language| language.native_name);
+        let mut selected = self.ui_language;
+        egui::ComboBox::from_id_salt("ui-language-picker")
+            .width(118.0)
+            .selected_text(format!("🌐 {current_label}"))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut selected, i18n::ENGLISH, "English");
+                let mut missing = Vec::new();
+                for language in i18n::UI_LANGUAGES {
+                    if self.language_packs.iter().any(|pack| pack.id == language.code) {
+                        ui.selectable_value(&mut selected, language.code, language.native_name);
+                    } else {
+                        missing.push(language.english_name);
+                    }
+                }
+                if !missing.is_empty() {
+                    ui.separator();
+                    // Native names would need the missing fonts, so list them in English.
+                    ui.label(
+                        egui::RichText::new(trf(
+                            "Not installed: {0}",
+                            &[&missing.join(", ")],
+                        ))
+                        .color(theme.muted)
+                        .size(11.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(tr(
+                            "Get more languages in Neko Legends Control Center → Languages.",
+                        ))
+                        .color(theme.muted)
+                        .size(11.0),
+                    );
+                }
+            })
+            .response
+            .on_hover_text(tr("Interface language"));
+
+        if selected != self.ui_language {
+            self.set_ui_language(ui.ctx(), selected);
         }
     }
 
@@ -1763,16 +1951,17 @@ impl MarkRushApp {
         if let Some(path) = file_to_open {
             self.request_open_file(path);
             if added > 1 {
-                self.set_status(format!(
-                    "Added {added} temporary hierarchies and opened file"
+                self.set_status(trf(
+                    "Added {0} temporary hierarchies and opened file",
+                    &[&added],
                 ));
             } else {
-                self.set_status("Added temporary hierarchy and opened file");
+                self.set_status(tr("Added temporary hierarchy and opened file"));
             }
         } else if added == 1 {
-            self.set_status("Added temporary hierarchy");
+            self.set_status(tr("Added temporary hierarchy"));
         } else if added > 1 {
-            self.set_status(format!("Added {added} temporary hierarchies"));
+            self.set_status(trf("Added {0} temporary hierarchies", &[&added]));
         }
     }
 
@@ -1800,7 +1989,7 @@ impl MarkRushApp {
         if index < self.temporary_hierarchies.len() {
             let hierarchy = self.temporary_hierarchies.remove(index);
             self.known_roots.remove(&hierarchy.root.path);
-            self.set_status("Closed temporary hierarchy");
+            self.set_status(tr("Closed temporary hierarchy"));
         }
     }
 
@@ -1827,13 +2016,13 @@ impl MarkRushApp {
             return;
         };
         let Some(file_name) = normalized_prompt_file_name(&self.new_file_name, true) else {
-            self.set_status("Enter a valid file name");
+            self.set_status(tr("Enter a valid file name"));
             return;
         };
 
         let target = parent.join(file_name);
         if target.exists() {
-            self.set_status("A file with that name already exists");
+            self.set_status(tr("A file with that name already exists"));
             return;
         }
 
@@ -1843,13 +2032,13 @@ impl MarkRushApp {
                 self.refresh_tree();
                 self.request_action(PendingAction::OpenFileForEdit(target));
             }
-            Err(error) => self.set_status(format!("Could not create file: {error}")),
+            Err(error) => self.set_status(trf("Could not create file: {0}", &[&error])),
         }
     }
 
     fn open_rename_prompt(&mut self, path: PathBuf) {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            self.set_status("Could not rename this item");
+            self.set_status(tr("Could not rename this item"));
             return;
         };
 
@@ -1862,11 +2051,11 @@ impl MarkRushApp {
             return;
         };
         let Some(parent) = source.parent() else {
-            self.set_status("Could not rename this item");
+            self.set_status(tr("Could not rename this item"));
             return;
         };
         let Some(file_name) = normalized_prompt_file_name(&self.rename_name, false) else {
-            self.set_status("Enter a valid name");
+            self.set_status(tr("Enter a valid name"));
             return;
         };
 
@@ -1877,7 +2066,7 @@ impl MarkRushApp {
             return;
         }
         if target.exists() {
-            self.set_status("An item with that name already exists");
+            self.set_status(tr("An item with that name already exists"));
             return;
         }
 
@@ -1886,9 +2075,9 @@ impl MarkRushApp {
                 self.after_item_renamed(&source, &target);
                 self.rename_target = None;
                 self.rename_name.clear();
-                self.set_status(format!("Renamed to {}", display_path(&target)));
+                self.set_status(trf("Renamed to {0}", &[&display_path(&target)]));
             }
-            Err(error) => self.set_status(format!("Rename failed: {error}")),
+            Err(error) => self.set_status(trf("Rename failed: {0}", &[&error])),
         }
     }
 
@@ -1951,12 +2140,12 @@ impl MarkRushApp {
         match action {
             TreeAction::OpenFile(path) => self.request_open_file(path),
             TreeAction::ShowInBrowser(path) => match show_in_file_browser(&path) {
-                Ok(()) => self.set_status("Opened item in system file browser"),
-                Err(error) => self.set_status(format!("Could not show item: {error}")),
+                Ok(()) => self.set_status(tr("Opened item in system file browser")),
+                Err(error) => self.set_status(trf("Could not show item: {0}", &[&error])),
             },
             TreeAction::CopyPath(path) => {
                 ctx.copy_text(display_path(&path));
-                self.set_status("Copied item path");
+                self.set_status(tr("Copied item path"));
             }
             TreeAction::Rename(path) => self.open_rename_prompt(path),
         }
@@ -2009,12 +2198,12 @@ impl MarkRushApp {
         self.known_roots.insert(root_path.clone());
         self.settings.last_root_path = Some(root_path.clone());
         self.save_settings();
-        self.set_status(format!("Opened folder {}", display_path(&root_path)));
+        self.set_status(trf("Opened folder {0}", &[&display_path(&root_path)]));
     }
 
     fn refresh_tree(&mut self) {
         if self.refresh_tree_silent() {
-            self.set_status("Folder tree refreshed");
+            self.set_status(tr("Folder tree refreshed"));
         }
     }
 
@@ -2046,7 +2235,7 @@ impl MarkRushApp {
 
         self.current_file_modified = Some(modified);
         if self.dirty {
-            self.set_status("File changed on disk; unsaved edits kept");
+            self.set_status(tr("File changed on disk; unsaved edits kept"));
             return;
         }
 
@@ -2084,11 +2273,11 @@ impl MarkRushApp {
                     .map(|state| state.reader_line);
                 self.save_settings();
                 self.rebuild_search();
-                self.set_status(format!("{verb} {}", display_path(&full_path)));
+                self.set_status(trf(&format!("{verb} {{0}}"), &[&display_path(&full_path)]));
                 true
             }
             Err(error) => {
-                self.set_status(format!("Could not load file: {error}"));
+                self.set_status(trf("Could not load file: {0}", &[&error]));
                 false
             }
         }
@@ -2109,7 +2298,7 @@ impl MarkRushApp {
         self.current_match = 0;
         self.settings.last_file_path = None;
         self.save_settings();
-        self.set_status("New untitled Markdown document");
+        self.set_status(tr("New untitled Markdown document"));
     }
 
     fn clear_file(&mut self) {
@@ -2133,13 +2322,13 @@ impl MarkRushApp {
             Some(path) => path,
             None if self.untitled_document => {
                 let Some(path) = self.pick_untitled_save_path() else {
-                    self.set_status("Save cancelled");
+                    self.set_status(tr("Save cancelled"));
                     return false;
                 };
                 path
             }
             None => {
-                self.set_status("No file to save");
+                self.set_status(tr("No file to save"));
                 return false;
             }
         };
@@ -2163,11 +2352,11 @@ impl MarkRushApp {
                 }
                 self.save_settings();
                 self.rebuild_search();
-                self.set_status("Saved");
+                self.set_status(tr("Saved"));
                 true
             }
             Err(error) => {
-                self.set_status(format!("Save failed: {error}"));
+                self.set_status(trf("Save failed: {0}", &[&error]));
                 false
             }
         }
@@ -2187,7 +2376,7 @@ impl MarkRushApp {
 
     fn open_print_preview(&mut self) {
         let Some(path) = self.current_file.as_ref() else {
-            self.set_status("Select a file before printing");
+            self.set_status(tr("Select a file before printing"));
             return;
         };
 
@@ -2199,19 +2388,19 @@ impl MarkRushApp {
         let document = build_print_document(title, &self.document_text);
         let page_count = document.pages.len();
         self.print_preview = Some(document);
-        self.set_status(format!("Prepared print preview ({page_count} page(s))"));
+        self.set_status(trf("Prepared print preview ({0} page(s))", &[&page_count]));
     }
 
     fn print_preview_document(&mut self) {
         let Some(document) = self.print_preview.as_ref() else {
-            self.set_status("Open print preview before printing");
+            self.set_status(tr("Open print preview before printing"));
             return;
         };
 
         match print_document(document) {
-            Ok(PrintOutcome::Printed) => self.set_status("Sent document to printer"),
-            Ok(PrintOutcome::Cancelled) => self.set_status("Print cancelled"),
-            Err(error) => self.set_status(format!("Print failed: {error}")),
+            Ok(PrintOutcome::Printed) => self.set_status(tr("Sent document to printer")),
+            Ok(PrintOutcome::Cancelled) => self.set_status(tr("Print cancelled")),
+            Err(error) => self.set_status(trf("Print failed: {0}", &[&error])),
         }
     }
 
@@ -2247,16 +2436,15 @@ impl MarkRushApp {
 
     fn search_status(&self) -> String {
         if !self.has_open_document() {
-            "No file".to_owned()
+            tr("No file")
         } else if self.search_query.trim().is_empty() {
-            "No search".to_owned()
+            tr("No search")
         } else if self.search_matches.is_empty() {
-            "No matches".to_owned()
+            tr("No matches")
         } else {
-            format!(
-                "{} of {}",
-                self.current_match + 1,
-                self.search_matches.len()
+            trf(
+                "{0} of {1}",
+                &[&(self.current_match + 1), &self.search_matches.len()],
             )
         }
     }
@@ -2284,7 +2472,7 @@ impl MarkRushApp {
                 if self.untitled_document {
                     "Untitled.md".to_owned()
                 } else {
-                    "No file selected".to_owned()
+                    tr("No file selected")
                 }
             })
     }
@@ -2295,7 +2483,7 @@ impl MarkRushApp {
             .map(|path| display_path(path))
             .unwrap_or_else(|| {
                 if self.untitled_document {
-                    "Unsaved document".to_owned()
+                    tr("Unsaved document")
                 } else {
                     String::new()
                 }
@@ -2550,8 +2738,8 @@ impl MarkRushApp {
 
         if is_external_link(target) {
             match open::that(target) {
-                Ok(()) => self.set_status("Opened external link"),
-                Err(error) => self.set_status(format!("Could not open link: {error}")),
+                Ok(()) => self.set_status(tr("Opened external link")),
+                Err(error) => self.set_status(trf("Could not open link: {0}", &[&error])),
             }
             return;
         }
@@ -2579,8 +2767,8 @@ impl MarkRushApp {
 
         if candidate.is_dir() {
             match open::that(&candidate) {
-                Ok(()) => self.set_status(format!("Opened folder {}", display_path(&candidate))),
-                Err(error) => self.set_status(format!("Could not open folder: {error}")),
+                Ok(()) => self.set_status(trf("Opened folder {0}", &[&display_path(&candidate)])),
+                Err(error) => self.set_status(trf("Could not open folder: {0}", &[&error])),
             }
             return;
         }
@@ -2593,12 +2781,12 @@ impl MarkRushApp {
                     self.request_action(PendingAction::OpenFile(candidate));
                 }
             } else if let Err(error) = open::that(&candidate) {
-                self.set_status(format!("Could not open file: {error}"));
+                self.set_status(trf("Could not open file: {0}", &[&error]));
             }
             return;
         }
 
-        self.set_status(format!("Link target not found: {target}"));
+        self.set_status(trf("Link target not found: {0}", &[&target]));
     }
 
     fn jump_to_anchor(&mut self, fragment: &str) {
@@ -2608,12 +2796,12 @@ impl MarkRushApp {
                 && create_heading_slug(&line.text) == target_slug
             {
                 self.pending_scroll_line = Some(index);
-                self.set_status(format!("Jumped to #{fragment}"));
+                self.set_status(trf("Jumped to #{0}", &[&fragment]));
                 return;
             }
         }
 
-        self.set_status(format!("Anchor not found: #{fragment}"));
+        self.set_status(trf("Anchor not found: #{0}", &[&fragment]));
     }
 }
 
@@ -2664,15 +2852,15 @@ fn show_tree(
         let mut action = response.body_returned.flatten();
         let path = entry.path.clone();
         response.header_response.context_menu(|ui| {
-            if ui.button("Show in File Explorer").clicked() {
+            if ui.button(tr("Show in File Explorer")).clicked() {
                 action = Some(TreeAction::ShowInBrowser(path.clone()));
                 ui.close();
             }
-            if ui.button("Copy Folder Path").clicked() {
+            if ui.button(tr("Copy Folder Path")).clicked() {
                 action = Some(TreeAction::CopyPath(path.clone()));
                 ui.close();
             }
-            if ui.button("Rename").clicked() {
+            if ui.button(tr("Rename")).clicked() {
                 action = Some(TreeAction::Rename(path.clone()));
                 ui.close();
             }
@@ -2694,15 +2882,15 @@ fn show_tree(
             .then(|| TreeAction::OpenFile(entry.path.clone()));
         let path = entry.path.clone();
         response.context_menu(|ui| {
-            if ui.button("Show in File Explorer").clicked() {
+            if ui.button(tr("Show in File Explorer")).clicked() {
                 action = Some(TreeAction::ShowInBrowser(path.clone()));
                 ui.close();
             }
-            if ui.button("Copy File Path").clicked() {
+            if ui.button(tr("Copy File Path")).clicked() {
                 action = Some(TreeAction::CopyPath(path.clone()));
                 ui.close();
             }
-            if ui.button("Rename").clicked() {
+            if ui.button(tr("Rename")).clicked() {
                 action = Some(TreeAction::Rename(path.clone()));
                 ui.close();
             }
@@ -2714,6 +2902,170 @@ fn show_tree(
 struct RenderLineOutput {
     clicked_link: Option<String>,
     copied_code: bool,
+}
+
+fn rendered_reader_layout_job(
+    lines: &[RenderLine],
+    theme: &AppTheme,
+    font_size: f32,
+    font_family: &egui::FontFamily,
+    current_match_line: Option<usize>,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+
+    for (index, line) in lines.iter().enumerate() {
+        let is_match = current_match_line == Some(index);
+        let mut format = egui::TextFormat {
+            font_id: egui::FontId::new(font_size, font_family.clone()),
+            color: if is_match {
+                theme.search_highlight_text
+            } else {
+                theme.text
+            },
+            background: if is_match {
+                theme.search_highlight
+            } else {
+                egui::Color32::TRANSPARENT
+            },
+            line_height: Some(reader_row_height(font_size)),
+            ..Default::default()
+        };
+
+        match line.kind {
+            RenderKind::Blank => job.append(" ", 0.0, format.clone()),
+            RenderKind::Rule => job.append(
+                "────────────────────────────────────────",
+                0.0,
+                format.clone(),
+            ),
+            RenderKind::Quote => {
+                let mut quote_format = format.clone();
+                quote_format.color = theme.accent;
+                job.append("│ ", 0.0, quote_format);
+                append_rendered_inline_markdown(&mut job, &line.text, &format, theme);
+            }
+            RenderKind::Heading(level) => {
+                let heading_size = match level {
+                    1 => font_size + 7.0,
+                    2 => font_size + 4.0,
+                    3 => font_size + 2.0,
+                    _ => font_size + 0.5,
+                };
+                format.font_id = egui::FontId::new(heading_size, font_family.clone());
+                format.line_height = Some(reader_row_height(heading_size));
+                format.coords.push(b"wght", 700.0);
+                append_rendered_inline_markdown(&mut job, &line.text, &format, theme);
+            }
+            RenderKind::CodeBlock { .. } => {
+                format.font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
+                if !is_match {
+                    format.background = theme.code;
+                }
+                format.expand_bg = 3.0;
+                job.append(&line.text, 0.0, format.clone());
+            }
+            RenderKind::List | RenderKind::Table | RenderKind::Paragraph => {
+                append_rendered_inline_markdown(&mut job, &line.text, &format, theme);
+            }
+        }
+
+        if index + 1 < lines.len() {
+            job.append("\n", 0.0, format);
+        }
+    }
+
+    job
+}
+
+fn append_rendered_inline_markdown(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    format: &egui::TextFormat,
+    theme: &AppTheme,
+) {
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if let Some(escaped) = remaining.strip_prefix('\\')
+            && let Some(character) = escaped.chars().next()
+        {
+            let character_len = character.len_utf8();
+            job.append(&escaped[..character_len], 0.0, format.clone());
+            remaining = &escaped[character_len..];
+            continue;
+        }
+
+        if remaining.starts_with('[')
+            && let Some(close_label) = remaining.find("](")
+            && let Some(close_target) = remaining[close_label + 2..].find(')')
+        {
+            let label = &remaining[1..close_label];
+            let mut link_format = format.clone();
+            link_format.color = theme.accent_2;
+            link_format.underline = egui::Stroke::new(1.0, theme.accent_2);
+            append_rendered_inline_markdown(job, label, &link_format, theme);
+            remaining = &remaining[close_label + 2 + close_target + 1..];
+            continue;
+        }
+
+        if let Some(after_open) = remaining.strip_prefix("**")
+            && let Some(close) = after_open.find("**")
+        {
+            let mut strong_format = format.clone();
+            strong_format.coords.push(b"wght", 700.0);
+            append_rendered_inline_markdown(job, &after_open[..close], &strong_format, theme);
+            remaining = &after_open[close + 2..];
+            continue;
+        }
+
+        if let Some(after_open) = remaining.strip_prefix("~~")
+            && let Some(close) = after_open.find("~~")
+        {
+            let mut strike_format = format.clone();
+            strike_format.strikethrough = egui::Stroke::new(1.0, format.color);
+            append_rendered_inline_markdown(job, &after_open[..close], &strike_format, theme);
+            remaining = &after_open[close + 2..];
+            continue;
+        }
+
+        if let Some(after_open) = remaining.strip_prefix('`')
+            && let Some(close) = after_open.find('`')
+        {
+            let mut code_format = format.clone();
+            code_format.font_id =
+                egui::FontId::new(format.font_id.size, egui::FontFamily::Monospace);
+            code_format.color = theme.accent;
+            code_format.background = theme.code;
+            code_format.expand_bg = 2.0;
+            job.append(&after_open[..close], 0.0, code_format);
+            remaining = &after_open[close + 1..];
+            continue;
+        }
+
+        if let Some(after_open) = remaining.strip_prefix('*')
+            && let Some(close) = after_open.find('*')
+        {
+            let mut italic_format = format.clone();
+            italic_format.italics = true;
+            append_rendered_inline_markdown(job, &after_open[..close], &italic_format, theme);
+            remaining = &after_open[close + 1..];
+            continue;
+        }
+
+        let next_marker = ["\\", "[", "**", "~~", "`", "*"]
+            .into_iter()
+            .filter_map(|marker| remaining.find(marker))
+            .filter(|index| *index > 0)
+            .min()
+            .unwrap_or(remaining.len());
+        let plain_len = if next_marker == 0 {
+            remaining.chars().next().map(char::len_utf8).unwrap_or(0)
+        } else {
+            next_marker
+        };
+        job.append(&remaining[..plain_len], 0.0, format.clone());
+        remaining = &remaining[plain_len..];
+    }
 }
 
 fn draw_render_line(
@@ -2843,7 +3195,7 @@ fn draw_code_block(
                                     CODE_BLOCK_COPY_BUTTON_SIZE,
                                 )),
                         )
-                        .on_hover_text("Copy text block");
+                        .on_hover_text(tr("Copy text block"));
                     if copy_response.clicked() {
                         ui.ctx()
                             .copy_text(line.copy_text.clone().unwrap_or_else(|| line.text.clone()));
@@ -2855,7 +3207,7 @@ fn draw_code_block(
 
         if let Some(alpha) = copy_feedback_alpha {
             ui.label(
-                egui::RichText::new("Copied")
+                egui::RichText::new(tr("Copied"))
                     .size((font_size - 1.0).max(10.0))
                     .color(theme.accent.gamma_multiply(alpha)),
             );
@@ -4023,6 +4375,114 @@ fn selection_scroll_speed(distance: f32, dead_zone: f32, max_speed: f32) -> f32 
     (clamped.min(1.0).max(0.0) * max_speed).ceil()
 }
 
+fn apply_editor_keyboard_selection_scroll(
+    ui: &egui::Ui,
+    output: &egui::containers::scroll_area::ScrollAreaOutput<egui::text_edit::TextEditOutput>,
+    font_size: f32,
+) {
+    if !output.inner.response.has_focus() {
+        return;
+    }
+
+    let (shift, page_up, page_down, selection_navigation) = ui.input(|input| {
+        let shift = input.modifiers.shift;
+        let page_up = shift && input.key_pressed(egui::Key::PageUp);
+        let page_down = shift && input.key_pressed(egui::Key::PageDown);
+        let selection_navigation = shift
+            && [
+                egui::Key::ArrowLeft,
+                egui::Key::ArrowRight,
+                egui::Key::ArrowUp,
+                egui::Key::ArrowDown,
+                egui::Key::Home,
+                egui::Key::End,
+                egui::Key::PageUp,
+                egui::Key::PageDown,
+            ]
+            .into_iter()
+            .any(|key| input.key_pressed(key));
+        (shift, page_up, page_down, selection_navigation)
+    });
+
+    if !shift || !selection_navigation {
+        return;
+    }
+
+    let mut cursor_range = output
+        .inner
+        .cursor_range
+        .or_else(|| output.inner.state.cursor.char_range());
+
+    if (page_up || page_down)
+        && let Some(mut range) = cursor_range
+    {
+        let row_height = reader_row_height(font_size).max(1.0);
+        let rows_per_page = ((output.inner_rect.height() / row_height).floor() as usize)
+            .saturating_sub(1)
+            .max(1);
+        let mut primary = range.primary;
+        let mut horizontal_position = range.h_pos;
+
+        for _ in 0..rows_per_page {
+            let (next, next_horizontal_position) = if page_up {
+                output
+                    .inner
+                    .galley
+                    .cursor_up_one_row(&primary, horizontal_position)
+            } else {
+                output
+                    .inner
+                    .galley
+                    .cursor_down_one_row(&primary, horizontal_position)
+            };
+
+            if next == primary {
+                break;
+            }
+            primary = next;
+            horizontal_position = next_horizontal_position;
+        }
+
+        range.primary = primary;
+        range.h_pos = horizontal_position;
+        let mut state = output.inner.state.clone();
+        state.cursor.set_char_range(Some(range));
+        state.store(ui.ctx(), output.inner.response.id);
+        cursor_range = Some(range);
+    }
+
+    let Some(range) = cursor_range else {
+        return;
+    };
+
+    let cursor_rect = output
+        .inner
+        .galley
+        .pos_from_cursor(range.primary)
+        .translate(output.inner.galley_pos.to_vec2());
+    let mut scroll_state = output.state;
+    let padding = reader_row_height(font_size);
+    let mut changed = false;
+
+    if cursor_rect.min.y < output.inner_rect.min.y + padding {
+        scroll_state.offset.y = (scroll_state.offset.y
+            - (output.inner_rect.min.y + padding - cursor_rect.min.y))
+            .max(0.0);
+        changed = true;
+    } else if cursor_rect.max.y > output.inner_rect.max.y - padding {
+        let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
+        scroll_state.offset.y = (scroll_state.offset.y
+            + (cursor_rect.max.y - (output.inner_rect.max.y - padding)))
+            .min(max_offset);
+        changed = true;
+    }
+
+    if changed || page_up || page_down {
+        scroll_state.store(ui.ctx(), output.id);
+        ui.ctx().request_repaint();
+    }
+}
+
 fn reader_scroll_overscan(viewport_height: f32) -> f32 {
     (viewport_height * READER_OVERSCAN_VIEWPORTS)
         .max(READER_MIN_OVERSCAN)
@@ -4066,7 +4526,11 @@ fn document_line_count(text: &str) -> usize {
     }
 }
 
-fn install_system_fonts(ctx: &egui::Context) {
+fn install_system_fonts(
+    ctx: &egui::Context,
+    language_packs: &[i18n::LanguagePack],
+    preferred_language: &str,
+) {
     let mut fonts = egui::FontDefinitions::default();
 
     #[cfg(target_os = "windows")]
@@ -4144,6 +4608,11 @@ fn install_system_fonts(ctx: &egui::Context) {
         include_bytes!("../assets/fonts/RobotoMono.ttf"),
         &monospace_fallbacks,
     );
+
+    // Shared Neko Legends language packs (installed by the Control Center)
+    // become fallbacks for every family, so CJK, Cyrillic, Thai and Arabic
+    // text renders instead of empty boxes.
+    i18n::add_language_pack_fonts(&mut fonts, language_packs, preferred_language);
 
     ctx.set_fonts(fonts);
 }
@@ -4262,6 +4731,41 @@ mod tests {
         ));
         assert_eq!(lines[0].text, "\nalpha\n");
         assert_eq!(lines[0].copy_text.as_deref(), Some("\nalpha\n"));
+    }
+
+    #[test]
+    fn rendered_reader_uses_one_continuous_text_buffer_across_code_blocks() {
+        let lines = parse_markdown_lines("Before\n```text\nalpha\nbeta\n```\nAfter");
+        let theme = &themes()[0];
+        let job = rendered_reader_layout_job(
+            &lines,
+            theme,
+            DEFAULT_DOCUMENT_FONT_SIZE,
+            &egui::FontFamily::Proportional,
+            None,
+        );
+
+        assert_eq!(job.text, "Before\nalpha\nbeta\nAfter");
+    }
+
+    #[test]
+    fn rendered_reader_formats_inline_markdown_without_showing_markers() {
+        let lines = parse_markdown_lines(
+            "- **Prompt tier:** *[EDIT]* with `inline code` and [reference](https://example.com)",
+        );
+        let theme = &themes()[0];
+        let job = rendered_reader_layout_job(
+            &lines,
+            theme,
+            DEFAULT_DOCUMENT_FONT_SIZE,
+            &egui::FontFamily::Proportional,
+            None,
+        );
+
+        assert_eq!(
+            job.text,
+            "- Prompt tier: [EDIT] with inline code and reference"
+        );
     }
 
     #[test]
