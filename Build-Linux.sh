@@ -7,7 +7,7 @@
 # Usage: ./Build-Linux.sh [yyyyMMddHHmmss build stamp]
 set -euo pipefail
 
-BUILD_STAMP="${1:-20261107000000}"
+BUILD_STAMP="${1:-20261109000000}"
 if [[ ! "$BUILD_STAMP" =~ ^[0-9]{14}$ ]]; then
     echo "Build stamp must use yyyyMMddHHmmss format." >&2
     exit 1

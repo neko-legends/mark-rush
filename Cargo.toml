@@ -1,6 +1,6 @@
 [package]
 name = "markrush"
-version = "26.11.7"
+version = "26.11.9"
 edition = "2024"
 license = "MIT"
 description = "Fast cross-platform local Markdown viewer/editor"

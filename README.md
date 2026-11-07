@@ -76,7 +76,7 @@ To create a Windows portable executable with a SHA256 checksum:
 .\Build-Windows.ps1
 ```
 
-The script defaults to the `v26.11.7` release stamp. Pass `-BuildStamp yyyyMMddHHmmss` to build a different dated release.
+The script defaults to the `v26.11.9` release stamp. Pass `-BuildStamp yyyyMMddHHmmss` to build a different dated release.
 
 The package is written to:
 

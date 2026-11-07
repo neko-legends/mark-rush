@@ -3,7 +3,7 @@
 #
 # - Push to the `release-test` branch: build both platforms and keep the files
 #   as workflow artifacts only (nothing is published) for testing.
-# - Push a tag like v26.11.7: build both platforms and upload the portable
+# - Push a tag like v26.11.9: build both platforms and upload the portable
 #   markrush.exe, the NSIS MarkRush-Setup.exe and markrush-linux-x86_64.zip to
 #   that tag's release (created if missing).
 # - Run manually with an existing tag: build only the Linux zip and add it to
