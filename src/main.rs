@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use directories::ProjectDirs;
@@ -49,10 +50,14 @@ const TOPBAR_FILE_ACTION_COUNT: f32 = 3.0;
 const CODE_BLOCK_COPY_GUTTER_WIDTH: f32 = 32.0;
 const CODE_BLOCK_COPY_BUTTON_SIZE: f32 = 24.0;
 const CODE_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1_200);
+const READER_WRAP_WIDTH_STEP: f32 = 16.0;
 const READER_HORIZONTAL_PADDING: f32 = 36.0;
 const READER_MIN_OVERSCAN: f32 = 900.0;
 const READER_OVERSCAN_VIEWPORTS: f32 = 1.5;
 const READER_MAX_OVERSCAN: f32 = 6_000.0;
+/// Write the remembered reader position once scrolling pauses, not on every
+/// scrolled frame.
+const VIEW_STATE_SAVE_DELAY: Duration = Duration::from_millis(1_000);
 const PRINT_PREVIEW_CHARS_PER_LINE: usize = 88;
 const PRINT_PREVIEW_LINES_PER_PAGE: usize = 54;
 
@@ -347,9 +352,208 @@ impl RenderLine {
     }
 }
 
+/// A search hit in the reader's displayed text (what the user sees, with
+/// Markdown markers removed), so it maps exactly onto the laid-out galley.
 #[derive(Clone)]
 struct SearchMatch {
+    /// Reader line (render line in Markdown mode, source line in Plain mode).
     line_index: usize,
+    /// Byte range in `ReaderDocument::text()`.
+    start: usize,
+    end: usize,
+}
+
+/// Where the reader should scroll on its next frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ReaderScrollTarget {
+    line: usize,
+    /// Byte offset in the reader text; `None` means the start of `line`.
+    byte: Option<usize>,
+    /// Center the target (search hits) instead of putting it at the top.
+    center: bool,
+}
+
+/// Everything that decides how the reader text is built and styled. When it
+/// is unchanged the cached job and galley are reused, so idle and scroll
+/// frames on huge documents skip rebuilding and re-hashing the whole text.
+#[derive(Clone, PartialEq)]
+struct ReaderKey {
+    generation: u64,
+    render_markdown: bool,
+    theme_index: usize,
+    font_size_bits: u32,
+    font_family: egui::FontFamily,
+}
+
+/// The reader's laid-out text, built once per document change instead of
+/// every frame.
+struct ReaderDocument {
+    key: ReaderKey,
+    job: Arc<egui::text::LayoutJob>,
+    /// Same bytes as the job text with single-char lowercase folding, so
+    /// case-insensitive search offsets line up with the displayed text.
+    folded_text: String,
+    /// Byte offset where each reader line starts in the text.
+    line_starts: Vec<usize>,
+    /// Char offset where each reader line starts (galley cursors are chars).
+    line_char_starts: Vec<usize>,
+    /// Last galley, reused while wrap width and fonts are unchanged.
+    galley: Option<CachedGalley>,
+    /// Rows of the current search hit, for repainting its glyphs on top of
+    /// the highlight; keyed by (start char, end char, galley pointer).
+    match_overlay: Option<((usize, usize, usize), Arc<egui::Galley>)>,
+}
+
+#[derive(Clone, PartialEq)]
+struct GalleyFingerprint {
+    /// Identifies the text being laid out (0 for the reader, whose cache
+    /// lives with its text).
+    content: (u64, u64),
+    wrap_bits: u32,
+    pixels_per_point_bits: u32,
+    options: egui::epaint::TextOptions,
+    /// Identity of the loaded font data (changes when fonts are reinstalled).
+    font_data: Vec<usize>,
+}
+
+struct CachedGalley {
+    fingerprint: GalleyFingerprint,
+    fill_ratio: f32,
+    galley: Arc<egui::Galley>,
+}
+
+impl GalleyFingerprint {
+    fn current(ctx: &egui::Context, content: (u64, u64)) -> Self {
+        let pixels_per_point_bits = ctx.pixels_per_point().to_bits();
+        ctx.fonts(|fonts| Self {
+            content,
+            wrap_bits: 0,
+            pixels_per_point_bits,
+            options: *fonts.options(),
+            font_data: fonts
+                .definitions()
+                .font_data
+                .values()
+                .map(|data| Arc::as_ptr(data) as usize)
+                .collect(),
+        })
+    }
+}
+
+/// Returns the cached galley when text, wrap width and fonts are unchanged;
+/// otherwise lays out `build()` and caches it. egui's own cache would also
+/// skip the layout, but only after cloning and hashing the whole job, which
+/// costs tens of milliseconds per frame on a 100k-line document.
+fn cached_layout(
+    ui: &egui::Ui,
+    cache: &mut Option<CachedGalley>,
+    base: &GalleyFingerprint,
+    width: f32,
+    build: impl FnOnce() -> egui::text::LayoutJob,
+) -> Arc<egui::Galley> {
+    let wanted = GalleyFingerprint {
+        wrap_bits: width.to_bits(),
+        ..base.clone()
+    };
+    let fill_ratio = ui.fonts(|fonts| fonts.font_atlas_fill_ratio());
+    if let Some(cached) = cache.as_ref()
+        && cached.fingerprint == wanted
+        // The font atlas only grows; a smaller fill means egui rebuilt it and
+        // the cached glyph positions are stale.
+        && fill_ratio >= cached.fill_ratio
+    {
+        return cached.galley.clone();
+    }
+    let mut job = build();
+    job.wrap.max_width = width;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let fill_ratio = ui.fonts(|fonts| fonts.font_atlas_fill_ratio());
+    *cache = Some(CachedGalley {
+        fingerprint: wanted,
+        fill_ratio,
+        galley: galley.clone(),
+    });
+    galley
+}
+
+/// The editor's text buffer: a `String` that counts its edits, so the editor
+/// layouter can tell an unchanged document without hashing all of it.
+struct RevisionedText<'a> {
+    text: &'a mut String,
+    revision: &'a std::cell::Cell<u64>,
+}
+
+impl RevisionedText<'_> {
+    fn bump(&self) {
+        self.revision.set(self.revision.get().wrapping_add(1));
+    }
+}
+
+impl egui::TextBuffer for RevisionedText<'_> {
+    fn is_mutable(&self) -> bool {
+        true
+    }
+
+    fn as_str(&self) -> &str {
+        self.text.as_str()
+    }
+
+    fn insert_text(&mut self, text: &str, char_index: usize) -> usize {
+        self.bump();
+        egui::TextBuffer::insert_text(self.text, text, char_index)
+    }
+
+    fn delete_char_range(&mut self, char_range: std::ops::Range<usize>) {
+        self.bump();
+        egui::TextBuffer::delete_char_range(self.text, char_range);
+    }
+
+    fn clear(&mut self) {
+        self.bump();
+        self.text.clear();
+    }
+
+    fn replace_with(&mut self, text: &str) {
+        self.bump();
+        text.clone_into(self.text);
+    }
+
+    fn type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<RevisionedText<'static>>()
+    }
+}
+
+impl ReaderDocument {
+    fn text(&self) -> &str {
+        &self.job.text
+    }
+
+    fn line_for_byte(&self, byte: usize) -> usize {
+        self.line_starts
+            .partition_point(|start| *start <= byte)
+            .saturating_sub(1)
+    }
+
+    fn byte_index(&self, char_index: usize) -> usize {
+        let line = self
+            .line_char_starts
+            .partition_point(|start| *start <= char_index)
+            .saturating_sub(1);
+        let line_start = self.line_starts.get(line).copied().unwrap_or(0);
+        let base = self.line_char_starts.get(line).copied().unwrap_or(0);
+        self.text()[line_start..]
+            .char_indices()
+            .nth(char_index - base)
+            .map_or(self.text().len(), |(offset, _)| line_start + offset)
+    }
+
+    fn char_index(&self, byte: usize) -> usize {
+        let line = self.line_for_byte(byte);
+        let line_start = self.line_starts.get(line).copied().unwrap_or(0);
+        let byte = byte.min(self.text().len());
+        let base = self.line_char_starts.get(line).copied().unwrap_or(0);
+        base + self.text()[line_start..byte].chars().count()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -415,7 +619,22 @@ struct MarkRushApp {
     pending_action: Option<PendingAction>,
     show_save_prompt: bool,
     known_roots: HashSet<PathBuf>,
-    pending_scroll_line: Option<usize>,
+    pending_scroll: Option<ReaderScrollTarget>,
+    /// Bumped whenever `document_text` changes.
+    document_generation: u64,
+    /// `render_lines` lag `document_text`: edits are parsed when the reader
+    /// is shown again, not on every keystroke.
+    render_lines_stale: bool,
+    reader_document: Option<ReaderDocument>,
+    /// Reader line at the top of the viewport (search starts from here).
+    reader_top_line: usize,
+    /// Edit counter of the editor buffer and its cached galley.
+    editor_revision: u64,
+    editor_galley: Option<CachedGalley>,
+    /// (generation, line count, char count) for the status bar.
+    document_stats: (u64, usize, usize),
+    /// Reader position changed; written to settings after scrolling settles.
+    view_state_save_due: Option<Instant>,
     focus_search: bool,
     middle_drag_scroll: Option<MiddleDragScroll>,
     initial_window_fit: InitialWindowFit,
@@ -471,7 +690,15 @@ impl MarkRushApp {
             pending_action: None,
             show_save_prompt: false,
             known_roots: HashSet::new(),
-            pending_scroll_line: None,
+            pending_scroll: None,
+            document_generation: 0,
+            render_lines_stale: false,
+            reader_document: None,
+            reader_top_line: 0,
+            editor_revision: 0,
+            editor_galley: None,
+            document_stats: (u64::MAX, 0, 0),
+            view_state_save_due: None,
             focus_search: false,
             middle_drag_scroll: None,
             initial_window_fit,
@@ -535,8 +762,10 @@ impl MarkRushApp {
         if !self.initial_window_fit_blocks_size_save() {
             self.remember_window_size(ui.ctx());
         }
+        self.refresh_reader_document(false);
         self.handle_shortcuts(ui);
         self.handle_focus_reload(ui.ctx());
+        self.flush_view_state_save(ui.ctx());
 
         let full_rect = ui.max_rect();
         let theme = self.theme().clone();
@@ -991,7 +1220,7 @@ impl MarkRushApp {
                     );
 
                     if response.changed() {
-                        self.rebuild_search();
+                        self.on_search_query_changed();
                     }
 
                     if ui
@@ -1031,10 +1260,7 @@ impl MarkRushApp {
                         ui.label(
                             egui::RichText::new(trf(
                                 "{0} lines, {1} chars",
-                                &[
-                                    &document_line_count(&self.document_text),
-                                    &self.document_text.chars().count(),
-                                ],
+                                &[&self.document_stats().0, &self.document_stats().1],
                             ))
                             .color(theme.muted),
                         );
@@ -1057,30 +1283,22 @@ impl MarkRushApp {
             return;
         }
 
-        if self.settings.render_markdown {
-            self.draw_continuous_markdown_reader(ui);
-        } else {
-            self.draw_plain_reader(ui);
-        }
+        self.draw_text_reader(ui);
     }
 
-    fn draw_continuous_markdown_reader(&mut self, ui: &mut egui::Ui) {
+    /// Draws the reader (Markdown or Plain) as one selectable text buffer.
+    /// The text, its layout job and its galley are cached in
+    /// `reader_document`, so frames that only scroll or repaint reuse them
+    /// instead of rebuilding, cloning and re-hashing the whole document.
+    fn draw_text_reader(&mut self, ui: &mut egui::Ui) {
+        // Edit mode, Markdown/Plain, theme or font may have changed earlier
+        // this frame (top bar); bring the cached text up to date first.
+        self.refresh_reader_document(false);
+        let Some(mut document) = self.reader_document.take() else {
+            return;
+        };
         let theme = self.theme().clone();
         let font_size = self.document_font_size();
-        let font_family = self.document_font_family();
-        let current_match_line = self
-            .search_matches
-            .get(self.current_match)
-            .map(|search_match| search_match.line_index);
-        let base_job = rendered_reader_layout_job(
-            &self.render_lines,
-            &theme,
-            font_size,
-            &font_family,
-            current_match_line,
-        );
-        let reader_text = base_job.text.clone();
-        let mut reader_buffer = reader_text.as_str();
         let wrap = self.settings.word_wrap;
         let available_size = ui.available_size();
         let desired_width = if wrap {
@@ -1088,53 +1306,139 @@ impl MarkRushApp {
         } else {
             UNWRAPPED_DOCUMENT_WIDTH
         };
-        let reader_id = egui::Id::new("continuous-markdown-reader").with(
+        let id_base = if document.key.render_markdown {
+            "continuous-markdown-reader"
+        } else {
+            "plain-reader"
+        };
+        let reader_id = egui::Id::new(id_base).with(
             self.current_file
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_default(),
         );
-        let mut layouter = move |ui: &egui::Ui, _text: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = base_job.clone();
-            job.wrap.max_width = if wrap { wrap_width } else { f32::INFINITY };
-            ui.fonts_mut(|fonts| fonts.layout_job(job))
+        let scroll_id = egui::Id::new("reader-scroll").with(reader_id);
+        let current_match = self.search_matches.get(self.current_match).cloned();
+        let pending_scroll = self.pending_scroll.take();
+
+        let fingerprint = GalleyFingerprint::current(ui.ctx(), (0, 0));
+
+        let output = {
+            let ReaderDocument { job, galley, .. } = &mut document;
+            let mut buffer: &str = job.text.as_str();
+            let mut layouter = |ui: &egui::Ui, _text: &dyn egui::TextBuffer, wrap_width: f32| {
+                // Snap the wrap width down to a step so the scroll bar
+                // fading in or a small resize does not re-lay out the whole
+                // document on every frame of the animation.
+                let width = if wrap {
+                    (wrap_width / READER_WRAP_WIDTH_STEP).floor().max(1.0) * READER_WRAP_WIDTH_STEP
+                } else {
+                    f32::INFINITY
+                };
+                cached_layout(ui, galley, &fingerprint, width, || (**job).clone())
+            };
+            let text_edit = egui::TextEdit::multiline(&mut buffer)
+                .id(reader_id)
+                .desired_width(desired_width)
+                .min_size(egui::vec2(desired_width, available_size.y))
+                .frame(egui::Frame::NONE)
+                .layouter(&mut layouter);
+            let scroll = if wrap {
+                egui::ScrollArea::vertical()
+            } else {
+                egui::ScrollArea::both()
+            }
+            .id_salt(scroll_id)
+            .content_margin(egui::Margin::symmetric(18, 12))
+            .auto_shrink([false, false]);
+
+            scroll.show(ui, |ui| {
+                let painter = ui.painter().clone();
+                (text_edit.show(ui), painter)
+            })
         };
-        let text_edit = egui::TextEdit::multiline(&mut reader_buffer)
-            .id(reader_id)
-            .desired_width(desired_width)
-            .min_size(egui::vec2(desired_width, available_size.y))
-            .frame(egui::Frame::NONE)
-            .layouter(&mut layouter);
-        let scroll_id = egui::Id::new("continuous-markdown-reader-scroll").with(reader_id);
-        let mut scroll = if wrap {
-            egui::ScrollArea::vertical()
-        } else {
-            egui::ScrollArea::both()
-        }
-        .id_salt(scroll_id)
-        .content_margin(egui::Margin::symmetric(18, 12))
-        .auto_shrink([false, false]);
 
-        if let Some(line) = self.pending_scroll_line.take() {
-            scroll = scroll.vertical_scroll_offset(line as f32 * reader_row_height(font_size));
+        let (text_output, painter) = &output.inner;
+        let galley = &text_output.galley;
+        let galley_pos = text_output.galley_pos;
+
+        // Highlight the current hit: a filled box over its exact text, then
+        // the hit's glyphs again in the theme's contrasting highlight color.
+        if let Some(search_match) = &current_match {
+            let start = document.char_index(search_match.start);
+            let end = document.char_index(search_match.end);
+            let overlay_key = (start, end, Arc::as_ptr(galley) as usize);
+            let overlay = match &document.match_overlay {
+                Some((key, overlay)) if *key == overlay_key => overlay.clone(),
+                _ => {
+                    let overlay = Arc::new(glyph_only_galley_rows(galley, start, end));
+                    document.match_overlay = Some((overlay_key, overlay.clone()));
+                    overlay
+                }
+            };
+            for rect in galley_range_rects(galley, start, end) {
+                let rect = rect.translate(galley_pos.to_vec2());
+                painter.rect_filled(rect.expand(2.0), 3, theme.search_highlight);
+                painter.with_clip_rect(rect.intersect(painter.clip_rect())).add(
+                    egui::epaint::TextShape::new(galley_pos, overlay.clone(), theme.text)
+                        .with_override_text_color(theme.search_highlight_text),
+                );
+            }
         }
 
-        let output = scroll.show(ui, |ui| text_edit.show(ui));
-        apply_editor_keyboard_selection_scroll(ui, &output, font_size);
+        // Scroll requests resolve against the real galley, so headings,
+        // wrapped lines and multi-line code blocks land exactly in view.
+        let mut scroll_state = output.state;
+        let viewport = output.inner_rect;
+        // Content y = 0 at the top of the scrolled content.
+        let content_origin = viewport.min - scroll_state.offset;
+        if let Some(target) = pending_scroll {
+            let byte = target.byte.unwrap_or_else(|| {
+                document.line_starts.get(target.line).copied().unwrap_or(0)
+            });
+            let cursor = egui::text::CCursor::new(document.char_index(byte));
+            let rect = galley
+                .pos_from_cursor(cursor)
+                .translate(galley_pos - content_origin);
+            let max_offset = (output.content_size - viewport.size()).max(egui::Vec2::ZERO);
+            let mut offset = scroll_state.offset;
+            if target.center {
+                offset.y = rect.center().y - viewport.height() / 2.0;
+                if !wrap {
+                    let visible_x = offset.x..=offset.x + viewport.width() - 40.0;
+                    if !visible_x.contains(&rect.min.x) {
+                        offset.x = rect.min.x - viewport.width() / 3.0;
+                    }
+                }
+            } else {
+                offset.y = rect.min.y - 12.0;
+                offset.x = 0.0;
+            }
+            scroll_state.offset = offset.clamp(egui::Vec2::ZERO, max_offset);
+            scroll_state.store(ui.ctx(), output.id);
+            ui.ctx().request_repaint();
+        }
+
+        apply_editor_keyboard_selection_scroll(ui, &output, text_output, font_size);
         self.apply_selection_drag_scroll(ui, &output, !wrap, true);
         self.apply_middle_mouse_scroll(ui, &output, !wrap, true);
 
-        let reader_line = (output.state.offset.y / reader_row_height(font_size))
-            .floor()
-            .max(0.0) as usize;
+        // Remember the top visible reader line for this file.
+        let top_y = scroll_state.offset.y + content_origin.y - galley_pos.y;
+        let top_cursor = galley.cursor_from_pos(egui::vec2(0.0, top_y.max(0.0)));
+        let top_byte = document.byte_index(top_cursor.index);
+        let reader_line = document.line_for_byte(top_byte);
+        self.reader_top_line = reader_line;
         if let Some(path) = self.current_file.clone() {
             let state = FileViewState { reader_line };
             if self.settings.file_view_states.get(&path) != Some(&state) {
                 self.settings.file_view_states.insert(path, state);
-                self.trim_stored_file_view_states();
-                self.save_settings();
+                self.view_state_save_due = Some(Instant::now() + VIEW_STATE_SAVE_DELAY);
+                ui.ctx().request_repaint_after(VIEW_STATE_SAVE_DELAY);
             }
         }
+
+        self.reader_document = Some(document);
     }
 
     #[allow(dead_code)]
@@ -1153,7 +1457,7 @@ impl MarkRushApp {
         }
 
         if !self.settings.render_markdown {
-            self.draw_plain_reader(ui);
+            self.draw_text_reader(ui);
             return;
         }
 
@@ -1162,7 +1466,7 @@ impl MarkRushApp {
             .get(self.current_match)
             .map(|search_match| search_match.line_index);
 
-        let pending_scroll_line = self.pending_scroll_line.take();
+        let pending_scroll_line = self.pending_scroll.take().map(|target| target.line);
         let current_match_line = current_match_line.or(pending_scroll_line);
         let font_size = self.document_font_size();
         let font_family = self.document_font_family();
@@ -1313,49 +1617,6 @@ impl MarkRushApp {
         }
     }
 
-    fn draw_plain_reader(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme().clone();
-        let font_size = self.document_font_size();
-        let font_family = self.document_font_family();
-
-        let file_scroll_id = egui::Id::new("plain-reader-scroll").with(
-            self.current_file
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string())
-                .unwrap_or_default(),
-        );
-        let mut scroll = if self.settings.word_wrap {
-            egui::ScrollArea::vertical()
-        } else {
-            egui::ScrollArea::both()
-        }
-        .id_salt(file_scroll_id)
-        .content_margin(egui::Margin::symmetric(18, 12))
-        .auto_shrink([false, false]);
-
-        if let Some(line) = self.pending_scroll_line.take() {
-            scroll = scroll.vertical_scroll_offset(line as f32 * reader_row_height(font_size));
-        }
-
-        let output = scroll.show(ui, |ui| {
-            if !self.settings.word_wrap {
-                ui.set_min_width(UNWRAPPED_DOCUMENT_WIDTH);
-            }
-
-            let label = egui::Label::new(
-                egui::RichText::new(&self.document_text)
-                    .font(egui::FontId::new(font_size, font_family))
-                    .color(theme.text),
-            );
-            if self.settings.word_wrap {
-                ui.add(label.wrap());
-            } else {
-                ui.add(label);
-            }
-        });
-        self.apply_middle_mouse_scroll(ui, &output, !self.settings.word_wrap, true);
-    }
-
     fn draw_editor(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme().clone();
 
@@ -1372,7 +1633,6 @@ impl MarkRushApp {
             UNWRAPPED_DOCUMENT_WIDTH
         };
         let font_size = self.document_font_size();
-        let font_family = self.document_editor_font_family();
 
         let editor_id = egui::Id::new("editor").with(
             self.current_file
@@ -1381,14 +1641,45 @@ impl MarkRushApp {
                 .unwrap_or_else(|| "untitled-document".to_owned()),
         );
         let editor_viewport_size = ui.available_size();
-        let edit = egui::TextEdit::multiline(&mut self.document_text)
+        // Same look as `.code_editor()`: the monospace text style.
+        let editor_font = egui::TextStyle::Monospace.resolve(ui.style());
+        let fingerprint = GalleyFingerprint::current(ui.ctx(), (0, 0));
+        let wrap = self.settings.word_wrap;
+        let revision = std::cell::Cell::new(self.editor_revision);
+        let editor_galley = &mut self.editor_galley;
+        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+            // Edits inside this frame bump the revision; key on it so the
+            // re-layout after a keystroke is never served a stale galley.
+            let fingerprint = GalleyFingerprint {
+                content: (1, revision.get()),
+                ..fingerprint.clone()
+            };
+            let wrap_width = if wrap {
+                (wrap_width / READER_WRAP_WIDTH_STEP).floor().max(1.0) * READER_WRAP_WIDTH_STEP
+            } else {
+                wrap_width
+            };
+            cached_layout(ui, editor_galley, &fingerprint, wrap_width, || {
+                egui::text::LayoutJob::simple(
+                    text.as_str().to_owned(),
+                    editor_font.clone(),
+                    theme.text,
+                    wrap_width,
+                )
+            })
+        };
+        let mut buffer = RevisionedText {
+            text: &mut self.document_text,
+            revision: &revision,
+        };
+        let edit = egui::TextEdit::multiline(&mut buffer)
             .id(editor_id)
             .desired_width(desired_width)
             .min_size(egui::vec2(desired_width, editor_viewport_size.y))
-            .font(egui::FontId::new(font_size, font_family))
+            .font(egui::TextStyle::Monospace)
             .text_color(theme.text)
-            .code_editor()
-            .lock_focus(true);
+            .lock_focus(true)
+            .layouter(&mut layouter);
 
         let editor_scroll_id = egui::Id::new("editor-scroll").with(
             self.current_file
@@ -1411,14 +1702,17 @@ impl MarkRushApp {
                 .show(ui, |ui| edit.show(ui))
         };
 
-        apply_editor_keyboard_selection_scroll(ui, &output, font_size);
+        self.editor_revision = revision.get();
+        apply_editor_keyboard_selection_scroll(ui, &output, &output.inner, font_size);
         self.apply_selection_drag_scroll(ui, &output, !self.settings.word_wrap, true);
         self.apply_middle_mouse_scroll(ui, &output, !self.settings.word_wrap, true);
 
         if output.inner.response.changed() {
             self.dirty = self.document_text != self.saved_text;
-            self.render_lines = parse_markdown_lines(&self.document_text);
-            self.rebuild_search();
+            // Only the reader needs the parsed lines; re-parse when it is
+            // shown again instead of on every keystroke.
+            self.document_generation = self.document_generation.wrapping_add(1);
+            self.render_lines_stale = true;
         }
     }
 
@@ -2300,7 +2594,8 @@ impl MarkRushApp {
             Ok(bytes) => {
                 self.document_text = String::from_utf8_lossy(&bytes).to_string();
                 self.saved_text = self.document_text.clone();
-                self.render_lines = parse_markdown_lines(&self.document_text);
+                self.mark_document_changed();
+                self.ensure_render_lines();
                 self.current_file = Some(full_path.clone());
                 self.untitled_document = false;
                 self.current_file_modified = file_modified_time(&full_path).ok();
@@ -2308,13 +2603,19 @@ impl MarkRushApp {
                 self.edit_mode = false;
                 self.code_copy_feedback = None;
                 self.settings.last_file_path = Some(full_path.clone());
-                self.pending_scroll_line = self
+                self.pending_scroll = self
                     .settings
                     .file_view_states
                     .get(&full_path)
-                    .map(|state| state.reader_line);
+                    .map(|state| ReaderScrollTarget {
+                        line: state.reader_line,
+                        byte: None,
+                        center: false,
+                    });
+                self.reader_top_line = 0;
                 self.save_settings();
-                self.rebuild_search();
+                self.search_matches.clear();
+                self.current_match = 0;
                 self.set_status(trf(&format!("{verb} {{0}}"), &[&display_path(&full_path)]));
                 true
             }
@@ -2331,11 +2632,11 @@ impl MarkRushApp {
         self.current_file_modified = None;
         self.document_text.clear();
         self.saved_text.clear();
-        self.render_lines.clear();
+        self.mark_document_changed();
         self.dirty = false;
         self.edit_mode = true;
         self.code_copy_feedback = None;
-        self.pending_scroll_line = None;
+        self.pending_scroll = None;
         self.search_matches.clear();
         self.current_match = 0;
         self.settings.last_file_path = None;
@@ -2349,7 +2650,7 @@ impl MarkRushApp {
         self.current_file_modified = None;
         self.document_text.clear();
         self.saved_text.clear();
-        self.render_lines.clear();
+        self.mark_document_changed();
         self.dirty = false;
         self.edit_mode = false;
         self.code_copy_feedback = None;
@@ -2383,7 +2684,6 @@ impl MarkRushApp {
                 self.saved_text = self.document_text.clone();
                 self.current_file_modified = file_modified_time(&path).ok();
                 self.dirty = false;
-                self.render_lines = parse_markdown_lines(&self.document_text);
                 self.settings.last_file_path = Some(path.clone());
                 if let Some(parent) = path.parent() {
                     if self.root.is_none() {
@@ -2393,7 +2693,6 @@ impl MarkRushApp {
                     }
                 }
                 self.save_settings();
-                self.rebuild_search();
                 self.set_status(tr("Saved"));
                 true
             }
@@ -2446,19 +2745,124 @@ impl MarkRushApp {
         }
     }
 
-    fn rebuild_search(&mut self) {
-        self.search_matches.clear();
-        self.current_match = 0;
+    /// The document text was replaced from outside the editor (load, new,
+    /// close).
+    fn mark_document_changed(&mut self) {
+        self.document_generation = self.document_generation.wrapping_add(1);
+        self.render_lines_stale = true;
+        self.editor_revision = self.editor_revision.wrapping_add(1);
+    }
 
-        let query = self.search_query.trim().to_lowercase();
-        if query.is_empty() {
+    fn ensure_render_lines(&mut self) {
+        if self.render_lines_stale {
+            self.render_lines = parse_markdown_lines(&self.document_text);
+            self.render_lines_stale = false;
+        }
+    }
+
+    fn document_stats(&mut self) -> (usize, usize) {
+        if self.document_stats.0 != self.document_generation {
+            self.document_stats = (
+                self.document_generation,
+                document_line_count(&self.document_text),
+                self.document_text.chars().count(),
+            );
+        }
+        (self.document_stats.1, self.document_stats.2)
+    }
+
+    fn reader_key(&self) -> ReaderKey {
+        ReaderKey {
+            generation: self.document_generation,
+            render_markdown: self.settings.render_markdown,
+            theme_index: self.theme_index,
+            font_size_bits: self.document_font_size().to_bits(),
+            font_family: self.document_font_family(),
+        }
+    }
+
+    /// Rebuilds the cached reader text when the document, mode, theme or font
+    /// changed, then re-runs the search against it. Skipped while editing
+    /// (the reader is hidden) so typing never pays for a full re-parse;
+    /// `force` rebuilds anyway, e.g. when the search query changes.
+    fn refresh_reader_document(&mut self, force: bool) {
+        let key = self.reader_key();
+        if self
+            .reader_document
+            .as_ref()
+            .is_some_and(|document| document.key == key)
+            || (self.edit_mode && !force)
+        {
             return;
         }
 
-        for (line_index, line) in self.render_lines.iter().enumerate() {
-            if line.text.to_lowercase().contains(&query) {
-                self.search_matches.push(SearchMatch { line_index });
-            }
+        self.ensure_render_lines();
+        let theme = self.theme();
+        let font_size = self.document_font_size();
+        let font_family = self.document_font_family();
+        let (job, line_starts) = if key.render_markdown {
+            build_rendered_reader_job(&self.render_lines, theme, font_size, &font_family)
+        } else {
+            build_plain_reader_job(&self.document_text, theme, font_size, &font_family)
+        };
+        self.reader_document = Some(ReaderDocument::new(key, job, line_starts));
+        self.run_search(true);
+    }
+
+    fn flush_view_state_save(&mut self, ctx: &egui::Context) {
+        let Some(due) = self.view_state_save_due else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= due {
+            self.view_state_save_due = None;
+            self.trim_stored_file_view_states();
+            self.save_settings();
+        } else {
+            ctx.request_repaint_after(due - now);
+        }
+    }
+
+    /// The search box changed: search again and show the first hit at or
+    /// below the current reading position.
+    fn on_search_query_changed(&mut self) {
+        self.refresh_reader_document(true);
+        self.run_search(false);
+        let top_line = self.reader_top_line;
+        if let Some(index) = self
+            .search_matches
+            .iter()
+            .position(|search_match| search_match.line_index >= top_line)
+        {
+            self.current_match = index;
+        }
+        self.scroll_to_current_match();
+    }
+
+    fn run_search(&mut self, keep_position: bool) {
+        let previous = self.current_match;
+        self.search_matches.clear();
+        self.current_match = 0;
+
+        let query = fold_search_text(self.search_query.trim());
+        if query.is_empty() {
+            return;
+        }
+        let Some(document) = self.reader_document.as_ref() else {
+            return;
+        };
+
+        self.search_matches = document
+            .folded_text
+            .match_indices(query.as_str())
+            .map(|(start, matched)| SearchMatch {
+                line_index: document.line_for_byte(start),
+                start,
+                end: start + matched.len(),
+            })
+            .collect();
+        if keep_position && !self.search_matches.is_empty() {
+            self.current_match = previous.min(self.search_matches.len() - 1);
         }
     }
 
@@ -2470,10 +2874,18 @@ impl MarkRushApp {
         let len = self.search_matches.len() as isize;
         let next = (self.current_match as isize + direction).rem_euclid(len);
         self.current_match = next as usize;
-        self.pending_scroll_line = self
+        self.scroll_to_current_match();
+    }
+
+    fn scroll_to_current_match(&mut self) {
+        self.pending_scroll = self
             .search_matches
             .get(self.current_match)
-            .map(|search_match| search_match.line_index);
+            .map(|search_match| ReaderScrollTarget {
+                line: search_match.line_index,
+                byte: Some(search_match.start),
+                center: true,
+            });
     }
 
     fn search_status(&self) -> String {
@@ -2544,13 +2956,6 @@ impl MarkRushApp {
         match self.document_font_choice().font_key {
             Some(font_key) => egui::FontFamily::Name(font_key.into()),
             None => egui::FontFamily::Proportional,
-        }
-    }
-
-    fn document_editor_font_family(&self) -> egui::FontFamily {
-        match self.document_font_choice().font_key {
-            Some(font_key) => egui::FontFamily::Name(font_key.into()),
-            None => egui::FontFamily::Monospace,
         }
     }
 
@@ -2842,7 +3247,11 @@ impl MarkRushApp {
             if matches!(line.kind, RenderKind::Heading(_))
                 && create_heading_slug(&line.text) == target_slug
             {
-                self.pending_scroll_line = Some(index);
+                self.pending_scroll = Some(ReaderScrollTarget {
+                    line: index,
+                    byte: None,
+                    center: false,
+                });
                 self.set_status(trf("Jumped to #{0}", &[&fragment]));
                 return;
             }
@@ -2951,29 +3360,32 @@ struct RenderLineOutput {
     copied_code: bool,
 }
 
+#[cfg(test)]
 fn rendered_reader_layout_job(
     lines: &[RenderLine],
     theme: &AppTheme,
     font_size: f32,
     font_family: &egui::FontFamily,
-    current_match_line: Option<usize>,
 ) -> egui::text::LayoutJob {
+    build_rendered_reader_job(lines, theme, font_size, font_family).0
+}
+
+/// Builds the Markdown reader text as one job, returning it with the byte
+/// offset where each render line starts.
+fn build_rendered_reader_job(
+    lines: &[RenderLine],
+    theme: &AppTheme,
+    font_size: f32,
+    font_family: &egui::FontFamily,
+) -> (egui::text::LayoutJob, Vec<usize>) {
     let mut job = egui::text::LayoutJob::default();
+    let mut line_starts = Vec::with_capacity(lines.len());
 
     for (index, line) in lines.iter().enumerate() {
-        let is_match = current_match_line == Some(index);
+        line_starts.push(job.text.len());
         let mut format = egui::TextFormat {
             font_id: egui::FontId::new(font_size, font_family.clone()),
-            color: if is_match {
-                theme.search_highlight_text
-            } else {
-                theme.text
-            },
-            background: if is_match {
-                theme.search_highlight
-            } else {
-                egui::Color32::TRANSPARENT
-            },
+            color: theme.text,
             line_height: Some(reader_row_height(font_size)),
             ..Default::default()
         };
@@ -3005,9 +3417,7 @@ fn rendered_reader_layout_job(
             }
             RenderKind::CodeBlock { .. } => {
                 format.font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
-                if !is_match {
-                    format.background = theme.code;
-                }
+                format.background = theme.code;
                 format.expand_bg = 3.0;
                 job.append(&line.text, 0.0, format.clone());
             }
@@ -3021,7 +3431,127 @@ fn rendered_reader_layout_job(
         }
     }
 
-    job
+    (job, line_starts)
+}
+
+/// Builds the Plain reader text (the raw document) with each source line's
+/// starting byte offset.
+fn build_plain_reader_job(
+    text: &str,
+    theme: &AppTheme,
+    font_size: f32,
+    font_family: &egui::FontFamily,
+) -> (egui::text::LayoutJob, Vec<usize>) {
+    let job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat {
+            font_id: egui::FontId::new(font_size, font_family.clone()),
+            color: theme.text,
+            ..Default::default()
+        },
+    );
+    let line_starts = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(index, _)| index + 1))
+        .collect();
+    (job, line_starts)
+}
+
+impl ReaderDocument {
+    fn new(key: ReaderKey, job: egui::text::LayoutJob, line_starts: Vec<usize>) -> Self {
+        let folded_text = fold_search_text(&job.text);
+        let mut line_char_starts = Vec::with_capacity(line_starts.len());
+        let mut chars = 0;
+        let mut previous = 0;
+        for start in &line_starts {
+            chars += job.text[previous..*start].chars().count();
+            line_char_starts.push(chars);
+            previous = *start;
+        }
+        Self {
+            key,
+            job: Arc::new(job),
+            folded_text,
+            line_starts,
+            line_char_starts,
+            galley: None,
+            match_overlay: None,
+        }
+    }
+}
+
+/// Case-folds text for search while keeping every character's UTF-8 length,
+/// so byte offsets found in the folded copy are valid in the original.
+fn fold_search_text(text: &str) -> String {
+    if text.is_ascii() {
+        return text.to_ascii_lowercase();
+    }
+    text.chars()
+        .map(|character| {
+            let mut lower = character.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(folded), None) if folded.len_utf8() == character.len_utf8() => folded,
+                _ => character,
+            }
+        })
+        .collect()
+}
+
+/// A copy of `galley` holding only the rows touching chars `start..end`,
+/// with backgrounds made transparent so painting it adds just the glyphs.
+fn glyph_only_galley_rows(galley: &egui::Galley, start: usize, end: usize) -> egui::Galley {
+    let mut overlay = galley.clone();
+    let mut row_start = 0;
+    overlay.rows = galley
+        .rows
+        .iter()
+        .filter_map(|placed| {
+            let row_chars = placed.char_count_including_newline();
+            let row_range = row_start..row_start + row_chars.max(1);
+            row_start += row_chars;
+            if row_range.start > end || row_range.end <= start {
+                return None;
+            }
+            let mut row = (*placed.row).clone();
+            let glyph_vertices = row.visuals.glyph_vertex_range.clone();
+            for (index, vertex) in row.visuals.mesh.vertices.iter_mut().enumerate() {
+                if !glyph_vertices.contains(&index) {
+                    vertex.color = egui::Color32::TRANSPARENT;
+                }
+            }
+            Some(egui::epaint::text::PlacedRow {
+                row: Arc::new(row),
+                ..placed.clone()
+            })
+        })
+        .collect();
+    overlay.num_vertices = overlay.rows.iter().map(|row| row.visuals.mesh.vertices.len()).sum();
+    overlay.num_indices = overlay.rows.iter().map(|row| row.visuals.mesh.indices.len()).sum();
+    overlay
+}
+
+/// Galley-relative rectangles covering chars `start..end` (one per row).
+fn galley_range_rects(galley: &egui::Galley, start: usize, end: usize) -> Vec<egui::Rect> {
+    let mut rects = Vec::new();
+    let mut row_start = 0;
+    for row in &galley.rows {
+        let row_chars = row.char_count_including_newline();
+        let row_end = row_start + row.char_count_excluding_newline();
+        if row_start >= end {
+            break;
+        }
+        if row_end > start || (row_start == start && start == end) {
+            let from = start.saturating_sub(row_start).min(row.char_count_excluding_newline());
+            let to = end.min(row_end) - row_start;
+            let min_x = row.pos.x + row.x_offset(from);
+            let max_x = row.pos.x + row.x_offset(to.max(from));
+            rects.push(egui::Rect::from_x_y_ranges(
+                min_x..=max_x,
+                row.min_y()..=row.max_y(),
+            ));
+        }
+        row_start += row_chars;
+    }
+    rects
 }
 
 fn append_rendered_inline_markdown(
@@ -4482,12 +5012,13 @@ fn selection_scroll_speed(distance: f32, dead_zone: f32, max_speed: f32) -> f32 
     (clamped.min(1.0).max(0.0) * max_speed).ceil()
 }
 
-fn apply_editor_keyboard_selection_scroll(
+fn apply_editor_keyboard_selection_scroll<R>(
     ui: &egui::Ui,
-    output: &egui::containers::scroll_area::ScrollAreaOutput<egui::text_edit::TextEditOutput>,
+    output: &egui::containers::scroll_area::ScrollAreaOutput<R>,
+    text_output: &egui::text_edit::TextEditOutput,
     font_size: f32,
 ) {
-    if !output.inner.response.has_focus() {
+    if !text_output.response.has_focus() {
         return;
     }
 
@@ -4515,10 +5046,9 @@ fn apply_editor_keyboard_selection_scroll(
         return;
     }
 
-    let mut cursor_range = output
-        .inner
+    let mut cursor_range = text_output
         .cursor_range
-        .or_else(|| output.inner.state.cursor.char_range());
+        .or_else(|| text_output.state.cursor.char_range());
 
     if (page_up || page_down)
         && let Some(mut range) = cursor_range
@@ -4532,13 +5062,11 @@ fn apply_editor_keyboard_selection_scroll(
 
         for _ in 0..rows_per_page {
             let (next, next_horizontal_position) = if page_up {
-                output
-                    .inner
+                text_output
                     .galley
                     .cursor_up_one_row(&primary, horizontal_position)
             } else {
-                output
-                    .inner
+                text_output
                     .galley
                     .cursor_down_one_row(&primary, horizontal_position)
             };
@@ -4552,9 +5080,9 @@ fn apply_editor_keyboard_selection_scroll(
 
         range.primary = primary;
         range.h_pos = horizontal_position;
-        let mut state = output.inner.state.clone();
+        let mut state = text_output.state.clone();
         state.cursor.set_char_range(Some(range));
-        state.store(ui.ctx(), output.inner.response.id);
+        state.store(ui.ctx(), text_output.response.id);
         cursor_range = Some(range);
     }
 
@@ -4562,11 +5090,10 @@ fn apply_editor_keyboard_selection_scroll(
         return;
     };
 
-    let cursor_rect = output
-        .inner
+    let cursor_rect = text_output
         .galley
         .pos_from_cursor(range.primary)
-        .translate(output.inner.galley_pos.to_vec2());
+        .translate(text_output.galley_pos.to_vec2());
     let mut scroll_state = output.state;
     let padding = reader_row_height(font_size);
     let mut changed = false;
@@ -4881,7 +5408,6 @@ mod tests {
             theme,
             DEFAULT_DOCUMENT_FONT_SIZE,
             &egui::FontFamily::Proportional,
-            None,
         );
 
         assert_eq!(job.text, "Before\nalpha\nbeta\nAfter");
@@ -4898,13 +5424,272 @@ mod tests {
             theme,
             DEFAULT_DOCUMENT_FONT_SIZE,
             &egui::FontFamily::Proportional,
-            None,
         );
 
         assert_eq!(
             job.text,
             "- Prompt tier: [EDIT] with inline code and reference"
         );
+    }
+
+    fn test_reader_document(markdown: &str) -> ReaderDocument {
+        let lines = parse_markdown_lines(markdown);
+        let (job, line_starts) = build_rendered_reader_job(
+            &lines,
+            &themes()[0],
+            DEFAULT_DOCUMENT_FONT_SIZE,
+            &egui::FontFamily::Proportional,
+        );
+        let key = ReaderKey {
+            generation: 0,
+            render_markdown: true,
+            theme_index: 0,
+            font_size_bits: 0,
+            font_family: egui::FontFamily::Proportional,
+        };
+        ReaderDocument::new(key, job, line_starts)
+    }
+
+    #[test]
+    fn search_offsets_point_into_displayed_text() {
+        let document = test_reader_document(
+            "# Título\n\n**Bold** intro\n```\nalpha\nbeta Needle\ngamma\n```\nAfter needle",
+        );
+        let hits: Vec<_> = document.folded_text.match_indices("needle").collect();
+        assert_eq!(hits.len(), 2);
+        // The first hit is inside the code block (render line 3), the second
+        // is on the last paragraph.
+        assert_eq!(document.line_for_byte(hits[0].0), 3);
+        assert_eq!(document.line_for_byte(hits[1].0), 4);
+        assert_eq!(&document.text()[hits[0].0..hits[0].0 + 6], "Needle");
+        // Char and byte offsets round-trip, including after the accented
+        // heading.
+        for (byte, _) in hits {
+            let char_index = document.char_index(byte);
+            assert_eq!(document.text().chars().take(char_index).map(char::len_utf8).sum::<usize>(), byte);
+            assert_eq!(document.byte_index(char_index), byte);
+        }
+    }
+
+    #[test]
+    fn search_folding_keeps_byte_offsets() {
+        let text = "Straße ÄÖÜ İstanbul ΣΑΣ";
+        let folded = fold_search_text(text);
+        assert_eq!(folded.len(), text.len());
+        assert!(folded.contains("äöü"));
+        assert!(folded.contains("σασ") || folded.contains("σας"));
+    }
+
+    /// Headless frame driver for performance and search-scroll checks on big
+    /// documents. Runs the real app UI (fonts, layout, tessellation) without a
+    /// window: `MARKRUSH_PERF_FILE=big.md cargo test --release -- --ignored
+    /// --nocapture large_document_harness`.
+    #[test]
+    #[ignore]
+    fn large_document_harness() {
+        let Some(path) = std::env::var_os("MARKRUSH_PERF_FILE").map(PathBuf::from) else {
+            eprintln!("MARKRUSH_PERF_FILE not set; skipping");
+            return;
+        };
+        let query = std::env::var("MARKRUSH_PERF_QUERY").unwrap_or_else(|_| "zebramark".into());
+        let config_home = std::env::temp_dir().join(format!("markrush-harness-{}", std::process::id()));
+        // SAFETY: single-threaded test setup before any other thread reads env.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_home) };
+
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = MarkRushApp::new(&cc);
+        app.settings_path = None;
+        app.settings = AppSettings::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+
+        let mut run = |app: &mut MarkRushApp, events: Vec<egui::Event>| -> (Duration, Vec<egui::epaint::ClippedShape>) {
+            let start = Instant::now();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| app.draw(ui, &mut frame));
+            let shapes = output.shapes.clone();
+            let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+            (start.elapsed(), shapes)
+        };
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let avg = |v: &[Duration]| v.iter().map(|d| ms(*d)).sum::<f64>() / v.len().max(1) as f64;
+
+        let _ = run(&mut app, Vec::new());
+        let start = Instant::now();
+        app.load_file(path.clone());
+        eprintln!("load_file (read+parse): {:.1} ms, {} render lines", ms(start.elapsed()), app.render_lines.len());
+        let (first, _) = run(&mut app, Vec::new());
+        eprintln!("first frame after open: {:.1} ms", ms(first));
+
+        let idle: Vec<_> = (0..10).map(|_| run(&mut app, Vec::new()).0).collect();
+        eprintln!("idle frame avg: {:.2} ms ({:?})", avg(&idle), idle.iter().map(|d| (ms(*d) * 10.0).round() / 10.0).collect::<Vec<_>>());
+
+        let pointer = egui::Event::PointerMoved(egui::pos2(900.0, 500.0));
+        let scroll: Vec<_> = (0..30)
+            .map(|_| {
+                run(
+                    &mut app,
+                    vec![
+                        pointer.clone(),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -400.0),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                )
+                .0
+            })
+            .collect();
+        eprintln!("scroll frame avg: {:.2} ms (max {:.2})", avg(&scroll), scroll.iter().map(|d| ms(*d)).fold(0.0, f64::max));
+
+        // Simulate typing the query one key at a time (each keystroke reruns search).
+        let mut typing = Vec::new();
+        app.search_query.clear();
+        for character in query.chars() {
+            let start = Instant::now();
+            app.search_query.push(character);
+            app.on_search_query_changed();
+            let _ = run(&mut app, Vec::new());
+            typing.push(start.elapsed());
+        }
+        eprintln!("search keystroke avg: {:.2} ms, {} matches", avg(&typing), app.search_matches.len());
+
+        // Step through every match and check the painted reader really shows it.
+        let total = app.search_matches.len();
+        let mut misses = 0;
+        let mut step_times = Vec::new();
+        for step in 0..total {
+            let start = Instant::now();
+            if step > 0 {
+                app.move_match(1);
+            }
+            let mut shapes = Vec::new();
+            for _ in 0..3 {
+                shapes = run(&mut app, Vec::new()).1;
+            }
+            step_times.push(start.elapsed());
+            let expected = harness_current_match_word(&app);
+            if !harness_text_visible(&shapes, &expected) {
+                misses += 1;
+                if misses <= 5 {
+                    eprintln!("match {} ({expected:?}) not visible after scrolling", step + 1);
+                }
+            }
+        }
+        eprintln!("next-match step avg: {:.2} ms; visible {}/{}", avg(&step_times), total - misses, total);
+
+        // Same check in Plain mode and with word wrap off.
+        for (render_markdown, word_wrap) in [(false, true), (true, false), (false, false)] {
+            app.settings.render_markdown = render_markdown;
+            app.settings.word_wrap = word_wrap;
+            let _ = run(&mut app, Vec::new());
+            app.on_search_query_changed();
+            let total = app.search_matches.len();
+            let mut visible = 0;
+            for step in 0..total {
+                if step > 0 {
+                    app.move_match(1);
+                }
+                let mut shapes = Vec::new();
+                for _ in 0..3 {
+                    shapes = run(&mut app, Vec::new()).1;
+                }
+                if harness_text_visible(&shapes, &harness_current_match_word(&app)) {
+                    visible += 1;
+                }
+            }
+            eprintln!("markdown={render_markdown} wrap={word_wrap}: visible {visible}/{total}");
+            assert_eq!(visible, total);
+        }
+        app.settings.render_markdown = true;
+        app.settings.word_wrap = true;
+
+        // Edit mode: typing into the 100k-line document.
+        app.edit_mode = true;
+        let (first_edit, _) = run(&mut app, Vec::new());
+        let unfocused: Vec<_> = (0..10).map(|_| run(&mut app, Vec::new()).0).collect();
+        eprintln!("edit mode: unfocused idle frame avg {:.2} ms", avg(&unfocused));
+        let editor_id = egui::Id::new("editor").with(path.to_string_lossy().to_string());
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        let _ = run(&mut app, Vec::new());
+        let edit_idle: Vec<_> = (0..10).map(|_| run(&mut app, Vec::new()).0).collect();
+        eprintln!("edit mode: idle frame avg {:.2} ms", avg(&edit_idle));
+        let keystrokes: Vec<_> = (0..20)
+            .map(|_| run(&mut app, vec![egui::Event::Text("x".into())]).0)
+            .collect();
+        eprintln!(
+            "edit mode: first frame {:.1} ms, keystroke frame avg {:.2} ms (max {:.2}), dirty={}",
+            ms(first_edit),
+            avg(&keystrokes),
+            keystrokes.iter().map(|d| ms(*d)).fold(0.0, f64::max),
+            app.dirty
+        );
+        app.edit_mode = false;
+        let (back, _) = run(&mut app, Vec::new());
+        eprintln!("back to reader (re-parse + relayout): {:.1} ms", ms(back));
+        app.search_query = "x".repeat(20);
+        app.on_search_query_changed();
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = run(&mut app, Vec::new()).1;
+        }
+        let typed_visible = harness_text_visible(&shapes, &app.search_query);
+        eprintln!("typed text found by search: {} match(es), visible={typed_visible}", app.search_matches.len());
+        assert_eq!(app.search_matches.len(), 1);
+        assert!(typed_visible);
+        let _ = fs::remove_dir_all(&config_home);
+        assert_eq!(misses, 0, "search scrolled to the wrong place");
+    }
+
+    /// The whole word around the current match (e.g. the unique `ZEBRAMARK0042`).
+    fn harness_current_match_word(app: &MarkRushApp) -> String {
+        let query = app.search_query.trim().to_lowercase();
+        let Some(search_match) = app.search_matches.get(app.current_match) else {
+            return String::new();
+        };
+        let text = match app.reader_document.as_ref() {
+            Some(document) => document.folded_text.clone(),
+            None => return String::new(),
+        };
+        let start = search_match.start;
+        assert_eq!(&text[start..search_match.end], query);
+        let end = text[start..]
+            .find(|c: char| !c.is_alphanumeric())
+            .map_or(text.len(), |offset| start + offset);
+        text[start..end].to_owned()
+    }
+
+    /// True when a painted text row containing `needle` lies inside its clip
+    /// rect (i.e. the user can see it).
+    fn harness_text_visible(shapes: &[egui::epaint::ClippedShape], needle: &str) -> bool {
+        if needle.is_empty() {
+            return false;
+        }
+        let needle = needle.to_lowercase();
+        shapes.iter().any(|clipped| {
+            let egui::Shape::Text(text) = &clipped.shape else {
+                return false;
+            };
+            if text.galley.rows.len() < 50 {
+                return false; // only the document reader, not toolbar labels
+            }
+            text.galley.rows.iter().any(|row| {
+                let y = text.pos.y + row.pos.y;
+                let rect = egui::Rect::from_min_size(egui::pos2(clipped.clip_rect.min.x, y), egui::vec2(1.0, row.height()));
+                if !clipped.clip_rect.intersects(rect) {
+                    return false;
+                }
+                let row_text: String = row.glyphs.iter().map(|glyph| glyph.chr).collect();
+                row_text.to_lowercase().contains(&needle)
+            })
+        })
     }
 
     #[test]
