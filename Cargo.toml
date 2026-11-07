@@ -1,6 +1,6 @@
 [package]
 name = "markrush"
-version = "0.1.0"
+version = "26.11.7"
 edition = "2024"
 license = "MIT"
 description = "Fast cross-platform local Markdown viewer/editor"
@@ -20,3 +20,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graph
 
 [build-dependencies]
 embed-resource = "3.0.9"
+
+# Linux: also build the OpenGL renderer as a fallback when wgpu cannot start.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.34.2", features = ["glow"] }

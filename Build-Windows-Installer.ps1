@@ -1,5 +1,5 @@
 param(
-    [string]$BuildStamp = '20260810000000'
+    [string]$BuildStamp = '20261107000000'
 )
 
 $ErrorActionPreference = 'Stop'

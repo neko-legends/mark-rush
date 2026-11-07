@@ -61,20 +61,60 @@ fn main() -> eframe::Result {
     let settings = load_settings(settings_path().as_deref());
     let window_size = startup_window_size(&settings);
 
-    let options = eframe::NativeOptions {
+    let result = run_app(native_options(window_size));
+
+    // wgpu cannot create a device when the GPU is out of memory (e.g. a large
+    // AI model filling VRAM) or its Vulkan driver is unusable; OpenGL still
+    // works then, so retry with the glow renderer instead of failing to start.
+    #[cfg(target_os = "linux")]
+    let result = match result {
+        Err(error @ eframe::Error::Wgpu(_)) => {
+            eprintln!("MarkRush: wgpu renderer failed ({error}); retrying with OpenGL");
+            let mut options = native_options(window_size);
+            options.renderer = eframe::Renderer::Glow;
+            run_app(options)
+        }
+        other => other,
+    };
+
+    result
+}
+
+fn native_options(window_size: [f32; 2]) -> eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MarkRush")
+            // Window class on Wayland/X11 (Hyprland window rules, launchers);
+            // ignored on Windows.
+            .with_app_id("markrush")
             .with_inner_size(window_size)
             .with_min_inner_size(MIN_WINDOW_SIZE)
             .with_icon(load_app_icon()),
         ..Default::default()
-    };
+    }
+}
 
+fn run_app(options: eframe::NativeOptions) -> eframe::Result {
     eframe::run_native(
         "MarkRush",
         options,
         Box::new(|cc| Ok(Box::new(MarkRushApp::new(cc)))),
     )
+}
+
+/// The window's inner rect in points. Wayland does not expose window
+/// positions, so winit/eframe report no inner rect there; fall back to the
+/// egui viewport, whose size is the window's inner size. Without this the
+/// first-launch fit never settles on Wayland, which kept the app repainting
+/// every frame (100% CPU on large documents) and never saved the window size.
+fn window_inner_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+    let inner_rect = ctx.input(|input| input.viewport().inner_rect);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let inner_rect = inner_rect.or_else(|| {
+        let rect = ctx.viewport_rect();
+        (rect.width() > 1.0 && rect.height() > 1.0).then_some(rect)
+    });
+    inner_rect
 }
 
 fn load_app_icon() -> egui::IconData {
@@ -385,6 +425,7 @@ struct MarkRushApp {
     rename_target: Option<PathBuf>,
     rename_name: String,
     print_preview: Option<PrintDocument>,
+    window_title: String,
 }
 
 impl MarkRushApp {
@@ -440,6 +481,7 @@ impl MarkRushApp {
             rename_target: None,
             rename_name: String::new(),
             print_preview: None,
+            window_title: String::new(),
         };
 
         app.apply_startup_target();
@@ -2512,7 +2554,7 @@ impl MarkRushApp {
         }
     }
 
-    fn update_window_title(&self, ctx: &egui::Context) {
+    fn update_window_title(&mut self, ctx: &egui::Context) {
         let marker = if self.dirty { "*" } else { "" };
         let file_name = self
             .current_file
@@ -2520,9 +2562,14 @@ impl MarkRushApp {
             .and_then(|path| path.file_name())
             .and_then(|name| name.to_str())
             .unwrap_or("MarkRush");
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "{marker}{file_name} - MarkRush"
-        )));
+        let title = format!("{marker}{file_name} - MarkRush");
+        // Every viewport command requests another frame, so only send the
+        // title when it changes; sending it every frame kept the app
+        // repainting nonstop (100% CPU on large documents).
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
     }
 
     fn trim_stored_file_view_states(&mut self) {
@@ -2681,7 +2728,7 @@ impl MarkRushApp {
                 ctx.request_repaint();
             }
             InitialWindowFit::PendingSave { size, frames } => {
-                let Some(inner_rect) = ctx.input(|input| input.viewport().inner_rect) else {
+                let Some(inner_rect) = window_inner_rect(ctx) else {
                     self.initial_window_fit = InitialWindowFit::PendingSave { size, frames };
                     ctx.request_repaint();
                     return;
@@ -2708,7 +2755,7 @@ impl MarkRushApp {
     }
 
     fn remember_window_size(&mut self, ctx: &egui::Context) {
-        let Some(inner_rect) = ctx.input(|input| input.viewport().inner_rect) else {
+        let Some(inner_rect) = window_inner_rect(ctx) else {
             return;
         };
 
@@ -3675,9 +3722,69 @@ fn print_document(document: &PrintDocument) -> Result<PrintOutcome, String> {
     windows_print::print_document(document)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn print_document(document: &PrintDocument) -> Result<PrintOutcome, String> {
+    linux_print::print_document(document)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 fn print_document(_document: &PrintDocument) -> Result<PrintOutcome, String> {
     Err("Printing is currently available in the Windows build".to_owned())
+}
+
+/// Linux/BSD printing: hand the paginated plain text to the CUPS `lp` command
+/// (default printer). The in-app print preview is the confirmation step.
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux_print {
+    use super::{PrintDocument, PrintOutcome};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    pub fn print_document(document: &PrintDocument) -> Result<PrintOutcome, String> {
+        let text = document
+            .pages
+            .iter()
+            .map(|page| page.lines.join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n\u{000C}");
+
+        let mut child = Command::new("lp")
+            .arg("-t")
+            .arg(&document.title)
+            .arg("--")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    "the `lp` command was not found (install CUPS)".to_owned()
+                } else {
+                    error.to_string()
+                }
+            })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|error| error.to_string())?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(PrintOutcome::Printed)
+        } else {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            Err(if message.is_empty() {
+                format!("lp exited with {}", output.status)
+            } else {
+                message
+            })
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -4562,6 +4669,38 @@ fn install_system_fonts(
                     .entry(egui::FontFamily::Monospace)
                     .or_default()
                     .insert(0, "markrush-monospace".to_owned());
+                break;
+            }
+        }
+    }
+
+    // egui's built-in fonts lack box-drawing glyphs used for rules and quote
+    // bars (Segoe UI covers them on Windows); add a common system font as the
+    // last fallback.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for path in [
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+        ] {
+            if let Ok(bytes) = fs::read(path) {
+                fonts.font_data.insert(
+                    "markrush-system-fallback".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                    fonts
+                        .families
+                        .entry(family)
+                        .or_default()
+                        .push("markrush-system-fallback".to_owned());
+                }
                 break;
             }
         }

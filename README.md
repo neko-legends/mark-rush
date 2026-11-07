@@ -38,6 +38,8 @@ Windows releases include a portable executable and an optional user-level instal
 - Portable EXE: download and run the executable directly; no install step is required.
 - Installer: installs to `%LOCALAPPDATA%\Programs\MarkRush`, creates a Start Menu shortcut, and registers an uninstall entry for the current user.
 
+Linux releases include `markrush-linux-x86_64.zip`, holding the `markrush` executable (built on Ubuntu 22.04, so it runs on Arch/Omarchy and other current distros). Unzip it and run `./markrush`; Neko Legends Control Center installs it automatically. MarkRush runs natively on Wayland (e.g. Hyprland, window class `markrush`) and X11, and falls back to OpenGL if the GPU's Vulkan device cannot be created. Printing on Linux sends the document to the default CUPS printer with `lp`.
+
 ## Build From Source
 
 Install Rust from [rustup.rs](https://rustup.rs/), then clone and build:
@@ -74,7 +76,7 @@ To create a Windows portable executable with a SHA256 checksum:
 .\Build-Windows.ps1
 ```
 
-The script defaults to the `v26.8.10` release stamp. Pass `-BuildStamp yyyyMMddHHmmss` to build a different dated release.
+The script defaults to the `v26.11.7` release stamp. Pass `-BuildStamp yyyyMMddHHmmss` to build a different dated release.
 
 The package is written to:
 
@@ -85,6 +87,16 @@ release/portable/
 The Windows portable folder contains `markrush.exe` and a matching SHA256 checksum. The release binary embeds the app icon, generated version metadata, statically links the Microsoft C runtime so it can run without a separate Visual C++ runtime install, and uses the Windows GUI subsystem so double-clicking it does not open a blank console.
 
 If Windows resource embedding fails, install the Visual Studio Build Tools or Windows SDK so Cargo can find the Windows resource compiler.
+
+## Linux Zip
+
+To create the Linux release zip with a SHA256 checksum:
+
+```bash
+./Build-Linux.sh
+```
+
+It uses the same build stamp default as the Windows scripts (pass `yyyyMMddHHmmss` as the first argument to override) and writes `release/linux/markrush-linux-x86_64.zip`.
 
 ## Windows Installer
 
